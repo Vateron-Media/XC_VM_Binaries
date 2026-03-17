@@ -1,5 +1,5 @@
 #!/bin/bash
-# Compilation script for XC_VM on Debian 11, 12 (Ubuntu 22) and Ubuntu 20.04
+# Compilation script for XC_VM on Debian 11/12 and Ubuntu 18.04/20.04/22.04/24.04
 # Author: melcocha14@gmail.com
 # Version: 1.8 (Improved with pipx and automatic detection of network.py)
 # Date: 2025-12-10
@@ -19,6 +19,47 @@ XC_VM_DIR="/home/xc_vm"
 BUILD_DIR="/tmp/xc_vm_build"
 LOG_FILE="/tmp/xc_vm_build.log"
 DISTRO_TYPE=""  # Detected in check_system()
+
+# Version variables (loaded from versions.json in load_versions)
+V_NGINX=""
+V_OPENSSL=""
+V_ZLIB=""
+V_PCRE=""
+V_PCRE2=""
+V_PHP=""
+V_FLV_MODULE=""
+
+# Load versions from versions.json
+load_versions() {
+    local vfile="/build/versions.json"
+    if [[ ! -f "$vfile" ]]; then
+        error "versions.json not found at $vfile"
+    fi
+
+    # Parse JSON with grep/sed (no python3 needed in minimal containers)
+    _json_ver() {
+        grep -A2 "\"${1}\"" "$2" | grep '"version"' | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
+    }
+
+    V_NGINX=$(_json_ver nginx "$vfile")
+    V_OPENSSL=$(_json_ver openssl "$vfile")
+    V_ZLIB=$(_json_ver zlib "$vfile")
+    V_PCRE=$(_json_ver pcre "$vfile")
+    V_PCRE2=$(_json_ver pcre2 "$vfile")
+    V_PHP=$(_json_ver php "$vfile")
+    V_FLV_MODULE=$(_json_ver nginx_http_flv_module "$vfile")
+
+    # Validate that all versions were parsed
+    for var in V_NGINX V_OPENSSL V_ZLIB V_PCRE V_PCRE2 V_PHP V_FLV_MODULE; do
+        if [[ -z "${!var}" ]]; then
+            error "Failed to parse $var from versions.json"
+        fi
+    done
+
+    log "Loaded versions from versions.json:"
+    log "  nginx=$V_NGINX openssl=$V_OPENSSL zlib=$V_ZLIB"
+    log "  pcre=$V_PCRE pcre2=$V_PCRE2 php=$V_PHP flv=$V_FLV_MODULE"
+}
 
 # Function for logging
 log() {
@@ -92,6 +133,9 @@ check_system() {
 install_dependencies() {
     log "Installing system dependencies..."
 
+    # Source os-release early so $ID is available for all distro-specific checks
+    . /etc/os-release
+
     apt-get update -y
 
     # Base build dependencies (common для всех дистрибутивов)
@@ -102,14 +146,14 @@ install_dependencies() {
         python3 python3-pip python3-venv \
         libcurl4-gnutls-dev libbz2-dev libzip-dev autoconf automake \
         libtool m4 gcc make pkg-config libmaxminddb-dev libssh2-1-dev \
-        libjpeg-dev libfreetype6-dev
+        libjpeg-dev libfreetype6-dev libsodium-dev libonig-dev
 
-    # PCRE selection: Debian 13 / Ubuntu 24 → PCRE2, иначе PCRE1
-    if apt-cache show libpcre2-dev &> /dev/null; then
-        log "Installing PCRE2 (Debian 13 / Ubuntu 24)"
+    # PCRE selection: Debian 12+ / Ubuntu 22+ -> PCRE2, otherwise PCRE1
+    if [[ "$ID" == "debian" && "$VERSION_MAJOR" -ge 12 ]] || [[ "$ID" == "ubuntu" && "$VERSION_MAJOR" -ge 22 ]]; then
+        log "Installing PCRE2 (Debian 12+ / Ubuntu 22+)"
         apt-get install -y libpcre2-8-0 libpcre2-dev
     else
-        log "Installing PCRE1 (Debian 11 / 12 / Ubuntu 20 / 22)"
+        log "Installing PCRE1 (Debian 11 / Ubuntu 18 / Ubuntu 20)"
         apt-get install -y libpcre3 libpcre3-dev
     fi
 
@@ -158,6 +202,10 @@ install_dependencies() {
         fi
     fi
 
+    # Free disk space: clean apt cache (after pipx install)
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
     # Fallback for Debian 11 / Ubuntu 20.04 or pipx failure
     if ! $USE_PIPX; then
         warn "pipx unavailable, using virtualenv"
@@ -165,8 +213,17 @@ install_dependencies() {
         if ! command -v pyinstaller &> /dev/null; then
             log "Installing PyInstaller via venv..."
             python3 -m venv /opt/pyinstaller_env
-            /opt/pyinstaller_env/bin/pip install --upgrade pip
-            /opt/pyinstaller_env/bin/pip install pyinstaller
+
+            # Pin versions for Python < 3.8 (e.g. Ubuntu 18.04 with Python 3.6)
+            if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,8) else 1)'; then
+                /opt/pyinstaller_env/bin/pip install --upgrade pip
+                /opt/pyinstaller_env/bin/pip install pyinstaller
+            else
+                warn "Python < 3.8 detected, using compatible versions"
+                /opt/pyinstaller_env/bin/pip install --upgrade "pip<22"
+                /opt/pyinstaller_env/bin/pip install "pyinstaller<5"
+            fi
+
             ln -sf /opt/pyinstaller_env/bin/pyinstaller /usr/local/bin/pyinstaller
         fi
     fi
@@ -199,44 +256,122 @@ setup_directories() {
     log "Directories configured"
 }
 
+download_with_stats() {
+    local url="$1"
+    local file="$2"
+    shift 2
+    local mirror_urls=("$@")
+    local filename
+    filename=$(basename "$file")
+
+    local all_urls=("$url" "${mirror_urls[@]}")
+    local attempt=0
+    local max_attempts=${#all_urls[@]}
+
+    for try_url in "${all_urls[@]}"; do
+        attempt=$((attempt + 1))
+
+        if (( max_attempts > 1 )); then
+            echo -ne "${BLUE}[INFO] Downloading ${filename} (source ${attempt}/${max_attempts})...${NC}"
+        else
+            echo -ne "${BLUE}[INFO] Downloading ${filename}...${NC}"
+        fi
+
+        local start_ts end_ts size duration speed size_mb
+        start_ts=$(date +%s)
+
+        local wget_status=0
+        # Quiet download with progress, timeout and retries
+        if wget --help 2>&1 | grep -q '\-\-show-progress'; then
+            wget -q --show-progress --progress=bar:force:noscroll \
+                --timeout=30 --connect-timeout=15 --tries=2 \
+                -O "$file" "$try_url" 2>&1 || wget_status=$?
+        else
+            # Fallback for older wget
+            wget -q --timeout=30 --connect-timeout=15 --tries=2 \
+                -O "$file" "$try_url" || wget_status=$?
+        fi
+
+        end_ts=$(date +%s)
+        duration=$((end_ts - start_ts))
+
+        # Clear the line and show result
+        echo -ne "\r\033[K"
+
+        if [[ $wget_status -eq 0 && -f "$file" ]]; then
+            size=$(stat -c%s "$file")
+            # Skip empty or suspiciously small files (< 1KB)
+            if (( size < 1024 )); then
+                warn "Downloaded file too small (${size} bytes), trying next source..."
+                rm -f "$file"
+                continue
+            fi
+            size_mb=$((size / 1024 / 1024))
+            if (( duration > 0 )); then
+                speed=$((size / duration / 1024))
+            else
+                speed=$((size / 1024))
+            fi
+            log "✓ ${filename}: ${size_mb} MB in ${duration}s (~${speed} KB/s)"
+            return 0
+        else
+            rm -f "$file"
+            if (( attempt < max_attempts )); then
+                warn "Download failed from source ${attempt}, trying next mirror..."
+            fi
+        fi
+    done
+
+    echo -e "${RED}[ERROR] Download failed: ${filename} (all sources exhausted)${NC}"
+    echo "[ERROR] Download failed: $file" >> "$LOG_FILE"
+    return 1
+}
+
 # Function to download NGINX dependencies
 download_nginx_deps() {
     log "Downloading NGINX dependencies..."
     cd "$BUILD_DIR"
 
     # OpenSSL
-    if [[ ! -d "openssl-3.5.1" ]]; then
-        log "Downloading OpenSSL 3.5.1..."
-        wget -q https://github.com/openssl/openssl/releases/download/openssl-3.5.1/openssl-3.5.1.tar.gz
-        tar -xzf openssl-3.5.1.tar.gz
+    if [[ ! -d "openssl-${V_OPENSSL}" ]]; then
+        download_with_stats \
+            "https://github.com/openssl/openssl/releases/download/openssl-${V_OPENSSL}/openssl-${V_OPENSSL}.tar.gz" \
+            "openssl-${V_OPENSSL}.tar.gz"
+        tar -xzf openssl-${V_OPENSSL}.tar.gz
     fi
 
     # Zlib
-    if [[ ! -d "zlib-1.3.1" ]]; then
-        log "Downloading Zlib 1.3.1..."
-        wget -q https://zlib.net/zlib-1.3.1.tar.gz
-        tar -xzf zlib-1.3.1.tar.gz
+    if [[ ! -d "zlib-${V_ZLIB}" ]]; then
+        download_with_stats \
+            "https://github.com/madler/zlib/releases/download/v${V_ZLIB}/zlib-${V_ZLIB}.tar.gz" \
+            "zlib-${V_ZLIB}.tar.gz" \
+            "https://zlib.net/zlib-${V_ZLIB}.tar.gz"
+        tar -xzf zlib-${V_ZLIB}.tar.gz
     fi
 
     # PCRE selection based on OS
     . /etc/os-release
-    if [[ "$ID" == "debian" && "$VERSION_ID" -ge 12 ]] || [[ "$ID" == "ubuntu" && "$VERSION_MAJOR" -ge 22 ]]; then
+    if [[ "$ID" == "debian" && "$VERSION_MAJOR" -ge 12 ]] || [[ "$ID" == "ubuntu" && "$VERSION_MAJOR" -ge 22 ]]; then
         # Use PCRE2
-        if [[ ! -d "pcre2-10.42" ]]; then
-            log "Downloading PCRE2 10.42..."
-            wget -q https://github.com/PhilipHazel/pcre2/releases/download/pcre2-10.42/pcre2-10.42.tar.gz
-            tar -xzf pcre2-10.42.tar.gz
+        if [[ ! -d "pcre2-${V_PCRE2}" ]]; then
+            download_with_stats \
+                "https://github.com/PhilipHazel/pcre2/releases/download/pcre2-${V_PCRE2}/pcre2-${V_PCRE2}.tar.gz" \
+                "pcre2-${V_PCRE2}.tar.gz"
+            tar -xzf pcre2-${V_PCRE2}.tar.gz
         fi
-        PCRE_DIR="pcre2-10.42"
+
+        PCRE_DIR="pcre2-${V_PCRE2}"
         PCRE_FLAGS=""
+
     else
-        # Use PCRE1
-        if [[ ! -d "pcre-8.45" ]]; then
-            log "Downloading PCRE 8.45..."
-            wget -q https://sourceforge.net/projects/pcre/files/pcre/8.45/pcre-8.45.tar.gz
-            tar -xzf pcre-8.45.tar.gz
+        if [[ ! -d "pcre-${V_PCRE}" ]]; then
+            download_with_stats \
+                "https://sourceforge.net/projects/pcre/files/pcre/${V_PCRE}/pcre-${V_PCRE}.tar.gz" \
+                "pcre-${V_PCRE}.tar.gz"
+            tar -xzf pcre-${V_PCRE}.tar.gz
         fi
-        PCRE_DIR="pcre-8.45"
+
+        PCRE_DIR="pcre-${V_PCRE}"
         PCRE_FLAGS="--with-pcre-jit"
     fi
 
@@ -245,6 +380,13 @@ download_nginx_deps() {
 
     # Static-only flags (used only for standard nginx)
     NGINX_STATIC_CFLAGS="-static -static-libgcc -m64 -mtune=generic -fPIC"
+
+    # Static linker flags — disable PIE on older toolchains (GCC < 10)
+    if [[ "$DISTRO_TYPE" == "Ubuntu" && "$VERSION_MAJOR" -le 20 ]]; then
+        NGINX_STATIC_LDFLAGS='-static -Wl,-z,relro -Wl,-z,now'
+    else
+        NGINX_STATIC_LDFLAGS='-static -Wl,-z,relro -Wl,-z,now -pie'
+    fi
 
     # Ubuntu 24 already defines _FORTIFY_SOURCE internally
     if [[ "$DISTRO_TYPE" != "Ubuntu" || "$VERSION_MAJOR" -ne 24 ]]; then
@@ -264,12 +406,11 @@ download_nginx_modules() {
     cd "$BUILD_DIR"
 
     # FLV Module
-    if [[ ! -d "nginx-http-flv-module-1.2.12" ]]; then
-        log "Downloading HTTP-FLV module..."
-        if ! wget -q https://github.com/winshining/nginx-http-flv-module/archive/refs/tags/v1.2.12.zip; then
-            error "Error downloading HTTP-FLV module"
-        fi
-        if ! unzip -q v1.2.12.zip; then
+    if [[ ! -d "nginx-http-flv-module-${V_FLV_MODULE}" ]]; then
+        download_with_stats \
+            "https://github.com/winshining/nginx-http-flv-module/archive/refs/tags/v${V_FLV_MODULE}.zip" \
+            "nginx-http-flv-module-${V_FLV_MODULE}.zip" || error "Error downloading HTTP-FLV module"
+        if ! unzip -q nginx-http-flv-module-${V_FLV_MODULE}.zip; then
             error "Error extracting HTTP-FLV module"
         fi
     fi
@@ -307,7 +448,7 @@ download_nginx_modules() {
     # fi
 
     # Verify that the modules were downloaded correctly
-    if [[ ! -d "nginx-http-flv-module-1.2.12" ]]; then
+    if [[ ! -d "nginx-http-flv-module-${V_FLV_MODULE}" ]]; then
         error "HTTP-FLV module was not downloaded correctly"
     fi
 
@@ -323,14 +464,17 @@ build_nginx() {
     log "Compiling standard NGINX..."
     cd "$BUILD_DIR"
 
-    # Download NGINX
-    if [[ ! -d "nginx-1.28.0" ]]; then
-        log "Downloading NGINX 1.28.0..."
-        wget -q https://nginx.org/download/nginx-1.28.0.tar.gz
-        tar -xzf nginx-1.28.0.tar.gz
+    # Download NGINX (with mirrors — nginx.org can be slow)
+    if [[ ! -d "nginx-${V_NGINX}" ]]; then
+        download_with_stats \
+            "https://nginx.org/download/nginx-${V_NGINX}.tar.gz" \
+            "nginx-${V_NGINX}.tar.gz" \
+            "https://github.com/nginx/nginx/releases/download/release-${V_NGINX}/nginx-${V_NGINX}.tar.gz" \
+            || error "Error downloading NGINX"
+        tar -xzf nginx-${V_NGINX}.tar.gz
     fi
 
-    cd nginx-1.28.0
+    cd nginx-${V_NGINX}
 
     # Configure compilation
     log "Configuring NGINX..."
@@ -351,11 +495,11 @@ build_nginx() {
         --with-http_sub_module \
         --with-http_v2_module \
         --with-cc-opt="$NGINX_STATIC_CFLAGS $NGINX_CFLAGS" \
-        --with-ld-opt='-static -Wl,-z,relro -Wl,-z,now -pie' \
+        --with-ld-opt="$NGINX_STATIC_LDFLAGS" \
         --with-pcre="../$PCRE_DIR" \
         $PCRE_FLAGS \
-        --with-zlib=../zlib-1.3.1 \
-        --with-openssl=../openssl-3.5.1 \
+        --with-zlib=../zlib-${V_ZLIB} \
+        --with-openssl=../openssl-${V_OPENSSL} \
         --with-openssl-opt=no-nextprotoneg
 
     # Compile and install
@@ -378,7 +522,7 @@ build_nginx() {
 build_nginx_rtmp() {
     log "Compiling NGINX with RTMP..."
 
-    cd "$BUILD_DIR/nginx-1.28.0"
+    cd "$BUILD_DIR/nginx-${V_NGINX}"
 
     # Clean previous configuration
     make clean || true
@@ -386,7 +530,7 @@ build_nginx_rtmp() {
     log "Configuring NGINX with RTMP..."
     ./configure \
         --prefix="$XC_VM_DIR/bin/nginx_rtmp" \
-        --add-module=../nginx-http-flv-module-1.2.12 \
+        --add-module=../nginx-http-flv-module-${V_FLV_MODULE} \
         --with-compat \
         --with-http_ssl_module \
         --with-http_v2_module \
@@ -403,8 +547,8 @@ build_nginx_rtmp() {
         --with-http_sub_module \
         --with-pcre="../$PCRE_DIR" \
         $PCRE_FLAGS \
-        --with-zlib=../zlib-1.3.1 \
-        --with-openssl=../openssl-3.5.1 \
+        --with-zlib=../zlib-${V_ZLIB} \
+        --with-openssl=../openssl-${V_OPENSSL} \
         --with-openssl-opt="no-shared -fPIC" \
         --with-cc-opt="$NGINX_CFLAGS" \
         --with-ld-opt='-Wl,-z,relro -Wl,-z,now -pie'
@@ -422,22 +566,32 @@ build_nginx_rtmp() {
     fi
 
     log "NGINX with RTMP compiled and installed"
+
+    # Free disk space: remove nginx/openssl/zlib/pcre sources (no longer needed)
+    log "Freeing disk space after NGINX builds..."
+    cd "$BUILD_DIR"
+    rm -rf nginx-${V_NGINX} openssl-${V_OPENSSL} zlib-${V_ZLIB} \
+           pcre-* pcre2-* ngx_* nginx-http-flv-module-* \
+           maxmind lua-* headers-more-* 2>/dev/null || true
+    rm -f *.tar.gz *.zip 2>/dev/null || true
+    log "Freed disk space successfully"
 }
 
 # Function to compile PHP-FPM
 build_php() {
-    log "Compiling PHP-FPM 8.1.33..."
+    log "Compiling PHP-FPM ${V_PHP}..."
 
     cd "$BUILD_DIR"
 
     # Download PHP
-    if [[ ! -d "php-8.1.33" ]]; then
-        log "Downloading PHP 8.1.33..."
-        wget -q -O php-8.1.33.tar.gz https://www.php.net/distributions/php-8.1.33.tar.gz
-        tar -xzf php-8.1.33.tar.gz
+    if [[ ! -d "php-${V_PHP}" ]]; then
+        download_with_stats \
+            "https://www.php.net/distributions/php-${V_PHP}.tar.gz" \
+            "php-${V_PHP}.tar.gz" || error "Error downloading PHP"
+        tar -xzf php-${V_PHP}.tar.gz
     fi
 
-    cd php-8.1.33
+    cd php-${V_PHP}
 
     # Configure compilation
     log "Configuring PHP..."
@@ -479,13 +633,18 @@ build_php() {
         --with-xmlrpc \
         --with-xsl \
         --with-libxml \
-        --disable-mbregex \
+        --with-sodium=/usr \
         --with-pear
 
     # Compile and install
     log "Compiling PHP..."
     make -j$(nproc)
     make install
+
+    # Verify sodium extension availability
+    if ! "$XC_VM_DIR/bin/php/bin/php" -m | grep -qi '^sodium$'; then
+        error "PHP sodium extension not available. Check libsodium-dev and rebuild."
+    fi
 
     # Copy configuration files
     cp php.ini-development "$XC_VM_DIR/bin/php/lib/php.ini"
@@ -507,6 +666,9 @@ install_php_extensions() {
     # Install extensions using pecl if available
     if [[ -f "$XC_VM_DIR/bin/php/bin/pecl" ]]; then
         log "Installing extensions with PECL..."
+
+        # Update PECL channel to avoid protocol warnings
+        "$XC_VM_DIR/bin/php/bin/pecl" channel-update pecl.php.net || true
 
         # Install maxminddb
         echo "yes" | "$XC_VM_DIR/bin/php/bin/pecl" install maxminddb || warn "Error installing maxminddb"
@@ -599,8 +761,17 @@ cleanup() {
     # Only clean compilation files, not the final binaries
     cd "$BUILD_DIR"
 
-    # Remove downloaded files but keep the sources
+    # Remove downloaded archives
     rm -f *.tar.gz *.zip 2>/dev/null || true
+
+    # Remove source/build directories to reclaim space
+    rm -rf nginx-${V_NGINX} php-${V_PHP} openssl-${V_OPENSSL} zlib-${V_ZLIB} \
+           pcre-* pcre2-* ngx_* nginx-http-flv-module-* \
+           maxmind lua-* headers-more-* 2>/dev/null || true
+
+    # Clean apt cache
+    apt-get clean 2>/dev/null || true
+    rm -rf /var/lib/apt/lists/* 2>/dev/null || true
 
     log "Cleanup completed"
 }
@@ -649,7 +820,10 @@ show_summary() {
 
 # Main compilation function
 main() {
-    log "Starting XC_VM compilation for Debian 12"
+    log "Starting XC_VM compilation"
+
+    # Load version config
+    load_versions
 
     # Initial checks
     check_root

@@ -14,6 +14,42 @@ XC_VM_DIR="/home/xc_vm"
 BUILD_DIR="/tmp/xc_vm_build"
 LOG_FILE="/tmp/xc_vm_build.log"
 
+# Version variables (loaded from versions.json in load_versions)
+V_NGINX=""
+V_OPENSSL=""
+V_ZLIB=""
+V_PCRE=""
+V_PHP=""
+V_FLV_MODULE=""
+
+# Load versions from versions.json
+load_versions() {
+    local vfile="/build/versions.json"
+    if [[ ! -f "$vfile" ]]; then
+        error "versions.json not found at $vfile"
+    fi
+
+    # Parse JSON with grep/sed (no python3 needed in minimal containers)
+    _json_ver() {
+        grep -A2 "\"${1}\"" "$2" | grep '"version"' | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
+    }
+
+    V_NGINX=$(_json_ver nginx "$vfile")
+    V_OPENSSL=$(_json_ver openssl "$vfile")
+    V_ZLIB=$(_json_ver zlib "$vfile")
+    V_PCRE=$(_json_ver pcre "$vfile")
+    V_PHP=$(_json_ver php "$vfile")
+    V_FLV_MODULE=$(_json_ver nginx_http_flv_module "$vfile")
+
+    for var in V_NGINX V_OPENSSL V_ZLIB V_PCRE V_PHP V_FLV_MODULE; do
+        if [[ -z "${!var}" ]]; then
+            error "Failed to parse $var from versions.json"
+        fi
+    done
+
+    log "Loaded versions: nginx=$V_NGINX openssl=$V_OPENSSL zlib=$V_ZLIB pcre=$V_PCRE php=$V_PHP flv=$V_FLV_MODULE"
+}
+
 # Logging
 log()   { echo -e "${GREEN}[$(date '+%F %T')] $1${NC}"; echo "[$(date '+%F %T')] $1" >> "$LOG_FILE"; }
 error() { echo -e "${RED}[ERROR] $1${NC}"; echo "[ERROR] $1" >> "$LOG_FILE"; exit 1; }
@@ -48,7 +84,7 @@ install_dependencies() {
         libcurl-devel bzip2-devel libzip-devel autoconf automake libtool \
         m4 gcc gcc-c++ make pkgconfig libmaxminddb-devel libssh2-devel \
         libjpeg-turbo-devel freetype-devel python3-virtualenv perl-FindBin perl-devel \
-        perl-core glibc-static libstdc++-static zlib-static pcre-static
+        perl-core glibc-static libstdc++-static zlib-static pcre-static oniguruma-devel
 
     # pyinstaller vía pipx
     if ! command -v pipx &>/dev/null; then
@@ -83,22 +119,25 @@ download_nginx_deps() {
     log "Descargando dependencias NGINX..."
     cd "$BUILD_DIR"
 
-    if [[ ! -d "openssl-3.5.1" ]]; then
-        log "Descargando OpenSSL 3.5.1..."
-        wget -q https://github.com/openssl/openssl/releases/download/openssl-3.5.1/openssl-3.5.1.tar.gz
-        tar -xzf openssl-3.5.1.tar.gz
+    if [[ ! -d "openssl-${V_OPENSSL}" ]]; then
+        log "Descargando OpenSSL ${V_OPENSSL}..."
+        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
+            https://github.com/openssl/openssl/releases/download/openssl-${V_OPENSSL}/openssl-${V_OPENSSL}.tar.gz
+        tar -xzf openssl-${V_OPENSSL}.tar.gz
     fi
 
-    if [[ ! -d "zlib-1.3.1" ]]; then
-        log "Descargando Zlib 1.3.1..."
-        wget -q https://zlib.net/zlib-1.3.1.tar.gz
-        tar -xzf zlib-1.3.1.tar.gz
+    if [[ ! -d "zlib-${V_ZLIB}" ]]; then
+        log "Descargando Zlib ${V_ZLIB}..."
+        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
+            https://zlib.net/zlib-${V_ZLIB}.tar.gz
+        tar -xzf zlib-${V_ZLIB}.tar.gz
     fi
 
-    if [[ ! -d "pcre-8.45" ]]; then
-        log "Descargando PCRE 8.45..."
-        wget -q https://sourceforge.net/projects/pcre/files/pcre/8.45/pcre-8.45.tar.gz
-        tar -xzf pcre-8.45.tar.gz
+    if [[ ! -d "pcre-${V_PCRE}" ]]; then
+        log "Descargando PCRE ${V_PCRE}..."
+        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
+            https://sourceforge.net/projects/pcre/files/pcre/${V_PCRE}/pcre-${V_PCRE}.tar.gz
+        tar -xzf pcre-${V_PCRE}.tar.gz
     fi
     log "Dependencias NGINX descargadas"
 }
@@ -108,13 +147,15 @@ download_nginx_modules() {
     log "Descargando módulos NGINX..."
     cd "$BUILD_DIR"
 
-    if [[ ! -d "nginx-http-flv-module-1.2.12" ]]; then
-        wget -q https://github.com/winshining/nginx-http-flv-module/archive/refs/tags/v1.2.12.zip -O v1.2.12.zip
-        unzip -q v1.2.12.zip
+    if [[ ! -d "nginx-http-flv-module-${V_FLV_MODULE}" ]]; then
+        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
+            https://github.com/winshining/nginx-http-flv-module/archive/refs/tags/v${V_FLV_MODULE}.zip -O v${V_FLV_MODULE}.zip
+        unzip -q v${V_FLV_MODULE}.zip
     fi
 
     if [[ ! -d "nginx-rtmp-module-1.2.2" ]]; then
-        wget -q https://github.com/arut/nginx-rtmp-module/archive/refs/tags/v1.2.2.tar.gz -O nginx-rtmp-module-1.2.2.tar.gz
+        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
+            https://github.com/arut/nginx-rtmp-module/archive/refs/tags/v1.2.2.tar.gz -O nginx-rtmp-module-1.2.2.tar.gz
         tar -xzf nginx-rtmp-module-1.2.2.tar.gz
     fi
     log "Módulos NGINX descargados"
@@ -122,12 +163,12 @@ download_nginx_modules() {
 
 # Compilar OpenSSL estático
 build_openssl() {
-    log "Compilando OpenSSL 3.5.1 estático..."
-    cd "$BUILD_DIR/openssl-3.5.1"
-    ./Configure linux-x86_64 no-shared no-tests -fPIC --prefix="$BUILD_DIR/openssl-3.5.1/.openssl"
+    log "Compilando OpenSSL ${V_OPENSSL} estático..."
+    cd "$BUILD_DIR/openssl-${V_OPENSSL}"
+    ./Configure linux-x86_64 no-shared no-tests -fPIC --prefix="$BUILD_DIR/openssl-${V_OPENSSL}/.openssl"
     make -j$(nproc)
     make install_sw
-    log "OpenSSL 3.5.1 listo"
+    log "OpenSSL ${V_OPENSSL} listo"
 }
 
 # NGINX estándar
@@ -135,11 +176,15 @@ build_nginx() {
     log "Compilando NGINX estándar..."
     cd "$BUILD_DIR"
 
-    [[ -d nginx-1.28.0 ]] || {
-        wget -q https://nginx.org/download/nginx-1.28.0.tar.gz
-        tar -xzf nginx-1.28.0.tar.gz
+    [[ -d nginx-${V_NGINX} ]] || {
+        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
+            https://nginx.org/download/nginx-${V_NGINX}.tar.gz \
+            || wget -q --timeout=30 --connect-timeout=15 --tries=3 \
+                https://github.com/nginx/nginx/releases/download/release-${V_NGINX}/nginx-${V_NGINX}.tar.gz \
+            || error "Error downloading NGINX"
+        tar -xzf nginx-${V_NGINX}.tar.gz
     }
-    cd nginx-1.28.0
+    cd nginx-${V_NGINX}
 
     ./configure \
         --prefix="$XC_VM_DIR/bin/nginx" \
@@ -159,10 +204,10 @@ build_nginx() {
         --with-http_v2_module \
         --with-cc-opt='-static -static-libgcc -O2 -g -pipe -Wall -U_FORTIFY_SOURCE -fexceptions -fstack-protector --param=ssp-buffer-size=4 -m64 -mtune=generic -fPIC' \
         --with-ld-opt='-static -Wl,-z,relro -Wl,-z,now -pie -lpthread -ldl' \
-        --with-pcre=../pcre-8.45 \
+        --with-pcre=../pcre-${V_PCRE} \
         --with-pcre-jit \
-        --with-zlib=../zlib-1.3.1 \
-        --with-openssl=../openssl-3.5.1 \
+        --with-zlib=../zlib-${V_ZLIB} \
+        --with-openssl=../openssl-${V_OPENSSL} \
         --with-openssl-opt="no-shared no-tests -fPIC"
 
     make -j$(nproc)
@@ -173,12 +218,12 @@ build_nginx() {
 # NGINX + RTMP
 build_nginx_rtmp() {
     log "Compilando NGINX con RTMP..."
-    cd "$BUILD_DIR/nginx-1.28.0"
+    cd "$BUILD_DIR/nginx-${V_NGINX}"
     make clean || true
 
     ./configure \
         --prefix="$XC_VM_DIR/bin/nginx_rtmp" \
-        --add-module=../nginx-http-flv-module-1.2.12 \
+        --add-module=../nginx-http-flv-module-${V_FLV_MODULE} \
         --with-compat \
         --with-http_auth_request_module \
         --with-file-aio \
@@ -195,7 +240,7 @@ build_nginx_rtmp() {
         --with-http_v2_module \
         --with-cc-opt='-static -static-libgcc -O2 -g -pipe -Wall -U_FORTIFY_SOURCE -fexceptions -fstack-protector --param=ssp-buffer-size=4 -m64 -mtune=generic -fPIC' \
         --with-ld-opt='-static -Wl,-z,relro -Wl,-z,now' \
-        --with-openssl=../openssl-3.5.1 \
+        --with-openssl=../openssl-${V_OPENSSL} \
         --with-openssl-opt="no-shared no-tests -fPIC"		
 
     make -j$(nproc)
@@ -206,14 +251,15 @@ build_nginx_rtmp() {
 
 # PHP-FPM
 build_php() {
-    log "Compilando PHP-FPM 8.1.33..."
+    log "Compilando PHP-FPM ${V_PHP}..."
     cd "$BUILD_DIR"
 
-    [[ -d php-8.1.33 ]] || {
-        wget -q -O php-8.1.33.tar.gz https://www.php.net/distributions/php-8.1.33.tar.gz
-        tar -xzf php-8.1.33.tar.gz
+    [[ -d php-${V_PHP} ]] || {
+        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
+            -O php-${V_PHP}.tar.gz https://www.php.net/distributions/php-${V_PHP}.tar.gz
+        tar -xzf php-${V_PHP}.tar.gz
     }
-    cd php-8.1.33
+    cd php-${V_PHP}
 
     ./configure \
         --prefix="$XC_VM_DIR/bin/php" \
@@ -326,6 +372,7 @@ build_network_binary() {
 # Main
 main() {
     log "Iniciando compilación de XC_VM para Rocky Linux 9"
+    load_versions
     check_root
     check_system
     install_dependencies
