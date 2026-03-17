@@ -1,0 +1,47 @@
+name: Check for version updates
+
+on:
+  schedule:
+    # Every Monday at 08:00 UTC
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Save current versions
+        run: cp versions.json versions.json.old
+
+      - name: Check for updates
+        run: ./check_versions.sh --apply
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if diff -q versions.json versions.json.old > /dev/null 2>&1; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "### Version updates detected" >> "$GITHUB_STEP_SUMMARY"
+            diff --unified versions.json.old versions.json >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+
+      - name: Commit updated versions.json
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add versions.json
+          git commit -m "chore: update dependency versions [auto]
+
+          $(diff --unified versions.json.old versions.json || true)"
+          git push
