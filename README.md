@@ -42,7 +42,13 @@ Each build outputs a `.tar.gz` archive with a ready-made XC_VM environment.
 │
 ├── out/                  # Build results (.tar.gz)
 │
+├── versions.json         # Centralized dependency versions (auto-updated)
+├── check_versions.sh     # Script to check for new upstream releases
 ├── build_all.sh          # CLI build management utility
+│
+├── .github/
+│   └── workflows/
+│       └── check-versions.yml  # GitHub Actions: weekly version check
 │
 ├── .gitignore
 └── README.md
@@ -76,6 +82,7 @@ The following will happen sequentially:
 
 * Docker images will be built
 * XC_VM will be built inside the containers
+* Automated tests will verify all binaries
 * Archives will be created
 
 Result:
@@ -85,9 +92,11 @@ out/
 ├── debian_11.tar.gz
 ├── debian_12.tar.gz
 ├── debian_13.tar.gz
-├── ubuntu20.tar.gz
-├── ubuntu24.tar.gz
-└── rocky9.tar.gz
+├── ubuntu_18.tar.gz
+├── ubuntu_20.tar.gz
+├── ubuntu_22.tar.gz
+├── ubuntu_24.tar.gz
+└── rocky_9.tar.gz
 ```
 
 ---
@@ -128,18 +137,54 @@ out/
 
 ## Supported targets
 
-| TARGET    | Distribution   |
-| --------- | ------------- |
-| debian_11 | Debian 11     |
-| debian_12 | Debian 12     |
-| debian_13 | Debian 13     |
-| ubuntu20  | Ubuntu 20.04  |
-| ubuntu24  | Ubuntu 24.04  |
-| rocky9    | Rocky Linux 9 |
+| TARGET      | Distribution    |
+| ----------- | --------------- |
+| debian_11   | Debian 11       |
+| debian_12   | Debian 12       |
+| debian_13   | Debian 13       |
+| ubuntu_18   | Ubuntu 18.04    |
+| ubuntu_20   | Ubuntu 20.04    |
+| ubuntu_22   | Ubuntu 22.04    |
+| ubuntu_24   | Ubuntu 24.04    |
+| rocky_9     | Rocky Linux 9   |
 
 ---
 
 ## How the build system works
+
+### 0. versions.json (version management)
+
+All dependency versions are defined in a single `versions.json` file at the project root.
+Build scripts read versions from this file at startup — no hardcoded versions in build scripts.
+
+**Automatic updates**: A GitHub Actions workflow (`check-versions.yml`) runs weekly and:
+
+1. Checks upstream releases for all components (nginx, openssl, zlib, pcre2, php, flv-module)
+2. Updates `versions.json` if newer versions are found
+3. Creates an auto-commit with the diff
+
+**Manual check**:
+
+```bash
+# Check for updates (dry run)
+./check_versions.sh
+
+# Apply updates to versions.json
+./check_versions.sh --apply
+```
+
+**Tracked components**:
+
+| Component              | Source                                    |
+| ---------------------- | ----------------------------------------- |
+| nginx                  | nginx.org (stable)                        |
+| openssl                | GitHub releases (3.x branch)              |
+| zlib                   | GitHub releases                           |
+| pcre2                  | GitHub releases                           |
+| php                    | php.net (8.1.x branch)                    |
+| nginx-http-flv-module  | GitHub releases                           |
+
+---
 
 ### 1. build_all.sh (host)
 
@@ -168,10 +213,37 @@ Rocky Linux     → build/rocky9.sh
 ```
 
 * starts the build
+* **runs automated tests** for all compiled binaries (see below)
 * prepares binaries
 * cleans up unnecessary files
 * sets correct permissions
 * packages the result into an archive
+
+---
+
+### 5. Automated Testing
+
+After compilation and before packaging, `entrypoint.sh` runs a suite of tests that validate every built binary. If any test fails, the build is aborted and no archive is created.
+
+#### NGINX tests
+
+* Binary exists at expected path
+* `nginx -V` outputs a valid version
+* Required modules are present: `http_ssl`, `http_v2`, `http_realip`, `http_stub_status`, `http_auth_request`
+
+#### NGINX RTMP tests
+
+* Binary exists at expected path
+* `nginx_rtmp -V` outputs a valid version
+* RTMP/FLV module is included
+
+#### PHP tests
+
+* `php` and `php-fpm` binaries exist
+* `php -v` reports PHP 8.x
+* Required extensions are loaded: `curl`, `mbstring`, `openssl`, `pdo_mysql`, `mysqli`, `gd`, `sockets`, `opcache`, `bcmath`, `exif`, `sodium`
+* `php-fpm -t` config validation (when config is available)
+* Basic PHP code execution (`php -r`)
 
 ---
 
@@ -228,6 +300,7 @@ docker image prune -f
 
 * The host system does not receive any dependencies
 * All builds are reproducible
+* Every build is automatically tested before packaging
 * The architecture is suitable for CI/CD (GitHub Actions, GitLab CI)
 
 ---

@@ -205,9 +205,11 @@ out/<target>.tar.gz
 | debian_11 | Debian 11     |
 | debian_12 | Debian 12     |
 | debian_13 | Debian 13     |
-| ubuntu20  | Ubuntu 20.04  |
-| ubuntu24  | Ubuntu 24.04  |
-| rocky9    | Rocky Linux 9 |
+| ubuntu_18 | Ubuntu 18.04  |
+| ubuntu_20 | Ubuntu 20.04  |
+| ubuntu_22 | Ubuntu 22.04  |
+| ubuntu_24 | Ubuntu 24.04  |
+| rocky_9   | Rocky Linux 9 |
 
 ---
 
