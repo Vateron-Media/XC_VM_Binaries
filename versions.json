@@ -1,8 +1,8 @@
 {
   "_comment": "Auto-updated by check_versions.sh workflow. Do not edit manually.",
-  "_updated": "2026-03-15",
+  "_updated": "2026-04-06",
   "nginx": {
-    "version": "1.29.6",
+    "version": "1.29.7",
     "url": "https://github.com/nginx/nginx/releases/download/release-{VERSION}/nginx-{VERSION}.tar.gz"
   },
   "openssl": {
