@@ -1,12 +1,12 @@
 {
   "_comment": "Auto-updated by check_versions.sh workflow. Do not edit manually.",
-  "_updated": "2026-04-06",
+  "_updated": "2026-04-13",
   "nginx": {
-    "version": "1.29.7",
+    "version": "1.29.8",
     "url": "https://github.com/nginx/nginx/releases/download/release-{VERSION}/nginx-{VERSION}.tar.gz"
   },
   "openssl": {
-    "version": "3.6.1",
+    "version": "3.6.2",
     "url": "https://github.com/openssl/openssl/releases/download/openssl-{VERSION}/openssl-{VERSION}.tar.gz"
   },
   "zlib": {
