@@ -134,4 +134,13 @@ case "$1" in
         ;;
 esac
 
+# ----------------------
+# Generate checksums
+# ----------------------
+if ls "$OUT_DIR"/*.tar.gz 1>/dev/null 2>&1; then
+    echo ">>> Generating hashes.md5..."
+    (cd "$OUT_DIR" && md5sum *.tar.gz > hashes.md5)
+    echo ">>> Checksums saved: $OUT_DIR/hashes.md5"
+fi
+
 echo "=== XC_VM BUILD COMPLETED ==="
