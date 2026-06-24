@@ -18,6 +18,7 @@ NC='\033[0m' # No Color
 XC_VM_DIR="/home/xc_vm"
 BUILD_DIR="/tmp/xc_vm_build"
 LOG_FILE="/tmp/xc_vm_build.log"
+VERSIONS_FILE="/build/versions.json"
 DISTRO_TYPE=""  # Detected in check_system()
 
 # Version variables (loaded from versions.json in load_versions)
@@ -29,9 +30,31 @@ V_PCRE2=""
 V_PHP=""
 V_FLV_MODULE=""
 
+# Print the download URLs for a versions.json key (one per line), substituting
+# {VERSION} and {ARCH}. All links live in versions.json so they can be edited
+# there without touching this script.
+#   $1 = json key, $2 = version (optional), $3 = arch (optional)
+_json_urls() {
+    sed -n "/\"$1\"[[:space:]]*:[[:space:]]*{/,/]/p" "$VERSIONS_FILE" |
+        grep -oE 'https?://[^"]+' |
+        sed -e "s/{VERSION}/${2:-}/g" -e "s/{ARCH}/${3:-}/g"
+}
+
+# download_json <key> <output-file> [version] [arch] — resolve the mirror list
+# from versions.json and download (cache-aware via download_with_stats).
+download_json() {
+    local key="$1" file="$2" version="${3:-}" arch="${4:-}"
+    local urls=()
+    mapfile -t urls < <(_json_urls "$key" "$version" "$arch")
+    if [[ ${#urls[@]} -eq 0 ]]; then
+        error "No URLs in versions.json for '$key'"
+    fi
+    download_with_stats "${urls[0]}" "$file" "${urls[@]:1}"
+}
+
 # Load versions from versions.json
 load_versions() {
-    local vfile="/build/versions.json"
+    local vfile="$VERSIONS_FILE"
     if [[ ! -f "$vfile" ]]; then
         error "versions.json not found at $vfile"
     fi
@@ -264,6 +287,15 @@ download_with_stats() {
     local filename
     filename=$(basename "$file")
 
+    # Prefer the host-mounted cache (build_all.sh pre-downloads into ./downloads,
+    # mounted read-only at /build/downloads). Fall back to the network if absent.
+    local cache="/build/downloads/$filename"
+    if [[ -f "$cache" && $(stat -c%s "$cache" 2>/dev/null || echo 0) -ge 1024 ]]; then
+        cp -f "$cache" "$file"
+        log "✓ ${filename}: from /build/downloads (cached)"
+        return 0
+    fi
+
     local all_urls=("$url" "${mirror_urls[@]}")
     local attempt=0
     local max_attempts=${#all_urls[@]}
@@ -334,18 +366,13 @@ download_nginx_deps() {
 
     # OpenSSL
     if [[ ! -d "openssl-${V_OPENSSL}" ]]; then
-        download_with_stats \
-            "https://github.com/openssl/openssl/releases/download/openssl-${V_OPENSSL}/openssl-${V_OPENSSL}.tar.gz" \
-            "openssl-${V_OPENSSL}.tar.gz"
+        download_json openssl "openssl-${V_OPENSSL}.tar.gz" "$V_OPENSSL"
         tar -xzf openssl-${V_OPENSSL}.tar.gz
     fi
 
     # Zlib
     if [[ ! -d "zlib-${V_ZLIB}" ]]; then
-        download_with_stats \
-            "https://github.com/madler/zlib/releases/download/v${V_ZLIB}/zlib-${V_ZLIB}.tar.gz" \
-            "zlib-${V_ZLIB}.tar.gz" \
-            "https://zlib.net/zlib-${V_ZLIB}.tar.gz"
+        download_json zlib "zlib-${V_ZLIB}.tar.gz" "$V_ZLIB"
         tar -xzf zlib-${V_ZLIB}.tar.gz
     fi
 
@@ -354,9 +381,7 @@ download_nginx_deps() {
     if [[ "$ID" == "debian" && "$VERSION_MAJOR" -ge 12 ]] || [[ "$ID" == "ubuntu" && "$VERSION_MAJOR" -ge 22 ]]; then
         # Use PCRE2
         if [[ ! -d "pcre2-${V_PCRE2}" ]]; then
-            download_with_stats \
-                "https://github.com/PhilipHazel/pcre2/releases/download/pcre2-${V_PCRE2}/pcre2-${V_PCRE2}.tar.gz" \
-                "pcre2-${V_PCRE2}.tar.gz"
+            download_json pcre2 "pcre2-${V_PCRE2}.tar.gz" "$V_PCRE2"
             tar -xzf pcre2-${V_PCRE2}.tar.gz
         fi
 
@@ -365,11 +390,7 @@ download_nginx_deps() {
 
     else
         if [[ ! -d "pcre-${V_PCRE}" ]]; then
-            download_with_stats \
-                "https://sourceforge.net/projects/pcre/files/pcre/${V_PCRE}/pcre-${V_PCRE}.tar.gz" \
-                "pcre-${V_PCRE}.tar.gz" \
-                "https://ftp.exim.org/pub/pcre/pcre-${V_PCRE}.tar.gz" \
-                "https://downloads.sourceforge.net/pcre/pcre-${V_PCRE}.tar.gz"
+            download_json pcre "pcre-${V_PCRE}.tar.gz" "$V_PCRE"
             tar -xzf pcre-${V_PCRE}.tar.gz
         fi
 
@@ -409,9 +430,8 @@ download_nginx_modules() {
 
     # FLV Module
     if [[ ! -d "nginx-http-flv-module-${V_FLV_MODULE}" ]]; then
-        download_with_stats \
-            "https://github.com/winshining/nginx-http-flv-module/archive/refs/tags/v${V_FLV_MODULE}.zip" \
-            "nginx-http-flv-module-${V_FLV_MODULE}.zip" || error "Error downloading HTTP-FLV module"
+        download_json nginx_http_flv_module "nginx-http-flv-module-${V_FLV_MODULE}.zip" "$V_FLV_MODULE" \
+            || error "Error downloading HTTP-FLV module"
         if ! unzip -q nginx-http-flv-module-${V_FLV_MODULE}.zip; then
             error "Error extracting HTTP-FLV module"
         fi
@@ -468,10 +488,7 @@ build_nginx() {
 
     # Download NGINX (with mirrors — nginx.org can be slow)
     if [[ ! -d "nginx-${V_NGINX}" ]]; then
-        download_with_stats \
-            "https://nginx.org/download/nginx-${V_NGINX}.tar.gz" \
-            "nginx-${V_NGINX}.tar.gz" \
-            "https://github.com/nginx/nginx/releases/download/release-${V_NGINX}/nginx-${V_NGINX}.tar.gz" \
+        download_json nginx "nginx-${V_NGINX}.tar.gz" "$V_NGINX" \
             || error "Error downloading NGINX"
         tar -xzf nginx-${V_NGINX}.tar.gz
     fi
@@ -587,9 +604,7 @@ build_php() {
 
     # Download PHP
     if [[ ! -d "php-${V_PHP}" ]]; then
-        download_with_stats \
-            "https://www.php.net/distributions/php-${V_PHP}.tar.gz" \
-            "php-${V_PHP}.tar.gz" || error "Error downloading PHP"
+        download_json php "php-${V_PHP}.tar.gz" "$V_PHP" || error "Error downloading PHP"
         tar -xzf php-${V_PHP}.tar.gz
     fi
 
@@ -710,17 +725,17 @@ install_ioncube_loader() {
     local php_mm="${V_PHP%.*}"
 
     # ionCube ships one bundle per CPU architecture.
-    local arch loader_pkg
+    local arch arch_tag loader_pkg
     arch="$(uname -m)"
     case "$arch" in
-        x86_64|amd64)  loader_pkg="ioncube_loaders_lin_x86-64.tar.gz" ;;
-        aarch64|arm64) loader_pkg="ioncube_loaders_lin_aarch64.tar.gz" ;;
+        x86_64|amd64)  arch_tag="x86-64" ;;
+        aarch64|arm64) arch_tag="aarch64" ;;
         *) warn "ionCube: unsupported architecture '$arch' — skipping loader"; return 0 ;;
     esac
+    loader_pkg="ioncube_loaders_lin_${arch_tag}.tar.gz"
 
-    download_with_stats \
-        "https://downloads.ioncube.com/loader_downloads/${loader_pkg}" \
-        "${loader_pkg}" || { warn "ionCube: download failed — skipping loader"; return 0; }
+    download_json ioncube "${loader_pkg}" "" "$arch_tag" \
+        || { warn "ionCube: download failed — skipping loader"; return 0; }
 
     rm -rf ioncube
     tar -xzf "${loader_pkg}" || { warn "ionCube: extract failed — skipping loader"; return 0; }
@@ -751,17 +766,26 @@ install_ioncube_loader() {
 
 # Function to create network.py if it does not exist
 create_network_py() {
-    log "Downloading network.py from GitHub..."
-
-    # Download network.py
-    curl -fsSL "https://raw.githubusercontent.com/Vateron-Media/XC_VM/refs/heads/main/src/bin/network.py" -o "$XC_VM_DIR/bin/network.py"
-
-    if [ $? -eq 0 ]; then
-        log "network.py successfully downloaded to $XC_VM_DIR/bin/network.py"
-    else
-        log "Failed to download network.py"
-        return 1
+    # Prefer the host-mounted cache, fall back to GitHub.
+    if [[ -f /build/downloads/network.py ]]; then
+        log "Using cached network.py from /build/downloads"
+        cp -f /build/downloads/network.py "$XC_VM_DIR/bin/network.py"
+        return 0
     fi
+
+    log "Downloading network.py..."
+
+    # URL(s) come from versions.json (network_py).
+    local u
+    for u in $(_json_urls network_py); do
+        if curl -fsSL "$u" -o "$XC_VM_DIR/bin/network.py"; then
+            log "network.py successfully downloaded to $XC_VM_DIR/bin/network.py"
+            return 0
+        fi
+    done
+
+    log "Failed to download network.py"
+    return 1
 }
 
 build_network_binary() {

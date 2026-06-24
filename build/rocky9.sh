@@ -13,6 +13,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 XC_VM_DIR="/home/xc_vm"
 BUILD_DIR="/tmp/xc_vm_build"
 LOG_FILE="/tmp/xc_vm_build.log"
+VERSIONS_FILE="/build/versions.json"
 
 # Version variables (loaded from versions.json in load_versions)
 V_NGINX=""
@@ -21,6 +22,7 @@ V_ZLIB=""
 V_PCRE=""
 V_PHP=""
 V_FLV_MODULE=""
+V_RTMP=""
 
 # Load versions from versions.json
 load_versions() {
@@ -40,14 +42,15 @@ load_versions() {
     V_PCRE=$(_json_ver pcre "$vfile")
     V_PHP=$(_json_ver php "$vfile")
     V_FLV_MODULE=$(_json_ver nginx_http_flv_module "$vfile")
+    V_RTMP=$(_json_ver nginx_rtmp_module "$vfile")
 
-    for var in V_NGINX V_OPENSSL V_ZLIB V_PCRE V_PHP V_FLV_MODULE; do
+    for var in V_NGINX V_OPENSSL V_ZLIB V_PCRE V_PHP V_FLV_MODULE V_RTMP; do
         if [[ -z "${!var}" ]]; then
             error "Failed to parse $var from versions.json"
         fi
     done
 
-    log "Loaded versions: nginx=$V_NGINX openssl=$V_OPENSSL zlib=$V_ZLIB pcre=$V_PCRE php=$V_PHP flv=$V_FLV_MODULE"
+    log "Loaded versions: nginx=$V_NGINX openssl=$V_OPENSSL zlib=$V_ZLIB pcre=$V_PCRE php=$V_PHP flv=$V_FLV_MODULE rtmp=$V_RTMP"
 }
 
 # Logging
@@ -55,6 +58,50 @@ log()   { echo -e "${GREEN}[$(date '+%F %T')] $1${NC}"; echo "[$(date '+%F %T')]
 error() { echo -e "${RED}[ERROR] $1${NC}"; echo "[ERROR] $1" >> "$LOG_FILE"; exit 1; }
 warn()  { echo -e "${YELLOW}[WARN] $1${NC}"; echo "[WARN] $1" >> "$LOG_FILE"; }
 info()  { echo -e "${BLUE}[INFO] $1${NC}"; echo "[INFO] $1" >> "$LOG_FILE"; }
+
+# fetch_cached <filename> <url> [mirror...] — prefer the host-mounted cache
+# (build_all.sh pre-downloads into ./downloads, mounted read-only at /build/downloads).
+# Falls back to the network, trying each URL in turn. Writes to "$filename" in cwd.
+fetch_cached() {
+    local filename="$1"; shift
+    local cache="/build/downloads/$filename"
+    if [[ -f "$cache" && $(stat -c%s "$cache" 2>/dev/null || echo 0) -ge 1024 ]]; then
+        cp -f "$cache" "$filename"
+        log "✓ ${filename}: from /build/downloads (cached)"
+        return 0
+    fi
+    local url
+    for url in "$@"; do
+        if wget -q --timeout=30 --connect-timeout=15 --tries=2 -O "$filename" "$url" &&
+            [[ $(stat -c%s "$filename" 2>/dev/null || echo 0) -ge 1024 ]]; then
+            return 0
+        fi
+        rm -f "$filename"
+    done
+    return 1
+}
+
+# Print the download URLs for a versions.json key (one per line), substituting
+# {VERSION} and {ARCH}. All links live in versions.json so they can be edited
+# there without touching this script.
+#   $1 = json key, $2 = version (optional), $3 = arch (optional)
+_json_urls() {
+    sed -n "/\"$1\"[[:space:]]*:[[:space:]]*{/,/]/p" "$VERSIONS_FILE" |
+        grep -oE 'https?://[^"]+' |
+        sed -e "s/{VERSION}/${2:-}/g" -e "s/{ARCH}/${3:-}/g"
+}
+
+# fetch_json <key> <filename> [version] [arch] — resolve the mirror list from
+# versions.json and fetch (cache-aware via fetch_cached).
+fetch_json() {
+    local key="$1" filename="$2" version="${3:-}" arch="${4:-}"
+    local urls=()
+    mapfile -t urls < <(_json_urls "$key" "$version" "$arch")
+    if [[ ${#urls[@]} -eq 0 ]]; then
+        return 1
+    fi
+    fetch_cached "$filename" "${urls[@]}"
+}
 
 # Verificar root
 check_root() {
@@ -122,30 +169,22 @@ download_nginx_deps() {
 
     if [[ ! -d "openssl-${V_OPENSSL}" ]]; then
         log "Descargando OpenSSL ${V_OPENSSL}..."
-        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
-            https://github.com/openssl/openssl/releases/download/openssl-${V_OPENSSL}/openssl-${V_OPENSSL}.tar.gz
+        fetch_json openssl "openssl-${V_OPENSSL}.tar.gz" "$V_OPENSSL" \
+            || error "Failed to download OpenSSL ${V_OPENSSL}"
         tar -xzf openssl-${V_OPENSSL}.tar.gz
     fi
 
     if [[ ! -d "zlib-${V_ZLIB}" ]]; then
         log "Descargando Zlib ${V_ZLIB}..."
-        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
-            https://zlib.net/zlib-${V_ZLIB}.tar.gz
+        fetch_json zlib "zlib-${V_ZLIB}.tar.gz" "$V_ZLIB" \
+            || error "Failed to download Zlib ${V_ZLIB}"
         tar -xzf zlib-${V_ZLIB}.tar.gz
     fi
 
     if [[ ! -d "pcre-${V_PCRE}" ]]; then
         log "Descargando PCRE ${V_PCRE}..."
-        wget -q --timeout=30 --connect-timeout=15 --tries=2 \
-            "https://sourceforge.net/projects/pcre/files/pcre/${V_PCRE}/pcre-${V_PCRE}.tar.gz" \
-            -O "pcre-${V_PCRE}.tar.gz" \
-        || wget -q --timeout=30 --connect-timeout=15 --tries=2 \
-            "https://ftp.exim.org/pub/pcre/pcre-${V_PCRE}.tar.gz" \
-            -O "pcre-${V_PCRE}.tar.gz" \
-        || wget -q --timeout=30 --connect-timeout=15 --tries=2 \
-            "https://downloads.sourceforge.net/pcre/pcre-${V_PCRE}.tar.gz" \
-            -O "pcre-${V_PCRE}.tar.gz" \
-        || error "Failed to download PCRE ${V_PCRE} from all sources"
+        fetch_json pcre "pcre-${V_PCRE}.tar.gz" "$V_PCRE" \
+            || error "Failed to download PCRE ${V_PCRE} from all sources"
         tar -xzf pcre-${V_PCRE}.tar.gz
     fi
     log "Dependencias NGINX descargadas"
@@ -157,15 +196,15 @@ download_nginx_modules() {
     cd "$BUILD_DIR"
 
     if [[ ! -d "nginx-http-flv-module-${V_FLV_MODULE}" ]]; then
-        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
-            https://github.com/winshining/nginx-http-flv-module/archive/refs/tags/v${V_FLV_MODULE}.zip -O v${V_FLV_MODULE}.zip
-        unzip -q v${V_FLV_MODULE}.zip
+        fetch_json nginx_http_flv_module "nginx-http-flv-module-${V_FLV_MODULE}.zip" "$V_FLV_MODULE" \
+            || error "Error downloading HTTP-FLV module"
+        unzip -q nginx-http-flv-module-${V_FLV_MODULE}.zip
     fi
 
-    if [[ ! -d "nginx-rtmp-module-1.2.2" ]]; then
-        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
-            https://github.com/arut/nginx-rtmp-module/archive/refs/tags/v1.2.2.tar.gz -O nginx-rtmp-module-1.2.2.tar.gz
-        tar -xzf nginx-rtmp-module-1.2.2.tar.gz
+    if [[ ! -d "nginx-rtmp-module-${V_RTMP}" ]]; then
+        fetch_json nginx_rtmp_module "nginx-rtmp-module-${V_RTMP}.tar.gz" "$V_RTMP" \
+            || error "Error downloading RTMP module"
+        tar -xzf nginx-rtmp-module-${V_RTMP}.tar.gz
     fi
     log "Módulos NGINX descargados"
 }
@@ -186,10 +225,7 @@ build_nginx() {
     cd "$BUILD_DIR"
 
     [[ -d nginx-${V_NGINX} ]] || {
-        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
-            https://nginx.org/download/nginx-${V_NGINX}.tar.gz \
-            || wget -q --timeout=30 --connect-timeout=15 --tries=3 \
-                https://github.com/nginx/nginx/releases/download/release-${V_NGINX}/nginx-${V_NGINX}.tar.gz \
+        fetch_json nginx "nginx-${V_NGINX}.tar.gz" "$V_NGINX" \
             || error "Error downloading NGINX"
         tar -xzf nginx-${V_NGINX}.tar.gz
     }
@@ -264,8 +300,8 @@ build_php() {
     cd "$BUILD_DIR"
 
     [[ -d php-${V_PHP} ]] || {
-        wget -q --timeout=30 --connect-timeout=15 --tries=3 \
-            -O php-${V_PHP}.tar.gz https://www.php.net/distributions/php-${V_PHP}.tar.gz
+        fetch_json php "php-${V_PHP}.tar.gz" "$V_PHP" \
+            || error "Error downloading PHP"
         tar -xzf php-${V_PHP}.tar.gz
     }
     cd php-${V_PHP}
@@ -331,16 +367,16 @@ install_ioncube_loader() {
     # PHP major.minor (e.g. 8.1 from 8.1.34) selects the matching loader .so.
     local php_mm="${V_PHP%.*}"
 
-    local arch loader_pkg
+    local arch arch_tag loader_pkg
     arch="$(uname -m)"
     case "$arch" in
-        x86_64|amd64)  loader_pkg="ioncube_loaders_lin_x86-64.tar.gz" ;;
-        aarch64|arm64) loader_pkg="ioncube_loaders_lin_aarch64.tar.gz" ;;
+        x86_64|amd64)  arch_tag="x86-64" ;;
+        aarch64|arm64) arch_tag="aarch64" ;;
         *) warn "ionCube: unsupported architecture '$arch' — skipping loader"; return 0 ;;
     esac
+    loader_pkg="ioncube_loaders_lin_${arch_tag}.tar.gz"
 
-    if ! wget -q --show-progress --timeout=30 --tries=2 \
-        -O "$loader_pkg" "https://downloads.ioncube.com/loader_downloads/${loader_pkg}"; then
+    if ! fetch_json ioncube "$loader_pkg" "" "$arch_tag"; then
         warn "ionCube: download failed — skipping loader"; return 0
     fi
 
@@ -370,17 +406,26 @@ install_ioncube_loader() {
 
 # Function to create network.py if it does not exist
 create_network_py() {
-    log "Downloading network.py from GitHub..."
-
-    # Download network.py
-    curl -fsSL "https://raw.githubusercontent.com/Vateron-Media/XC_VM/refs/heads/main/src/bin/network.py" -o "$XC_VM_DIR/bin/network.py"
-
-    if [ $? -eq 0 ]; then
-        log "network.py successfully downloaded to $XC_VM_DIR/bin/network.py"
-    else
-        log "Failed to download network.py"
-        return 1
+    # Prefer the host-mounted cache, fall back to GitHub.
+    if [[ -f /build/downloads/network.py ]]; then
+        log "Using cached network.py from /build/downloads"
+        cp -f /build/downloads/network.py "$XC_VM_DIR/bin/network.py"
+        return 0
     fi
+
+    log "Downloading network.py..."
+
+    # URL(s) come from versions.json (network_py).
+    local u
+    for u in $(_json_urls network_py); do
+        if curl -fsSL "$u" -o "$XC_VM_DIR/bin/network.py"; then
+            log "network.py successfully downloaded to $XC_VM_DIR/bin/network.py"
+            return 0
+        fi
+    done
+
+    log "Failed to download network.py"
+    return 1
 }
 
 build_network_binary() {

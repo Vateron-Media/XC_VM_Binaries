@@ -1,33 +1,66 @@
 {
-  "_comment": "Auto-updated by check_versions.sh workflow. Do not edit manually.",
+  "_comment": "Versions are auto-updated by check_versions.sh. URLs are editable here by hand — all build scripts read them, so download links can be changed without touching any script. Each 'url' is an ordered mirror list, tried in turn. Placeholders: {VERSION}, {ARCH}.",
   "_updated": "2026-06-22",
   "nginx": {
     "version": "1.31.2",
-    "url": "https://github.com/nginx/nginx/releases/download/release-{VERSION}/nginx-{VERSION}.tar.gz"
+    "url": [
+      "https://nginx.org/download/nginx-{VERSION}.tar.gz",
+      "https://github.com/nginx/nginx/releases/download/release-{VERSION}/nginx-{VERSION}.tar.gz"
+    ]
   },
   "openssl": {
     "version": "3.6.3",
-    "url": "https://github.com/openssl/openssl/releases/download/openssl-{VERSION}/openssl-{VERSION}.tar.gz"
+    "url": [
+      "https://github.com/openssl/openssl/releases/download/openssl-{VERSION}/openssl-{VERSION}.tar.gz"
+    ]
   },
   "zlib": {
     "version": "1.3.2",
-    "url": "https://github.com/madler/zlib/releases/download/v{VERSION}/zlib-{VERSION}.tar.gz",
-    "mirror": "https://zlib.net/zlib-{VERSION}.tar.gz"
+    "url": [
+      "https://github.com/madler/zlib/releases/download/v{VERSION}/zlib-{VERSION}.tar.gz",
+      "https://zlib.net/zlib-{VERSION}.tar.gz"
+    ]
   },
   "pcre": {
     "version": "8.45",
-    "url": "https://sourceforge.net/projects/pcre/files/pcre/8.45/pcre-8.45.tar.gz"
+    "url": [
+      "https://sourceforge.net/projects/pcre/files/pcre/{VERSION}/pcre-{VERSION}.tar.gz",
+      "https://ftp.exim.org/pub/pcre/pcre-{VERSION}.tar.gz",
+      "https://downloads.sourceforge.net/pcre/pcre-{VERSION}.tar.gz"
+    ]
   },
   "pcre2": {
     "version": "10.47",
-    "url": "https://github.com/PhilipHazel/pcre2/releases/download/pcre2-{VERSION}/pcre2-{VERSION}.tar.gz"
+    "url": [
+      "https://github.com/PhilipHazel/pcre2/releases/download/pcre2-{VERSION}/pcre2-{VERSION}.tar.gz"
+    ]
   },
   "php": {
     "version": "8.1.34",
-    "url": "https://www.php.net/distributions/php-{VERSION}.tar.gz"
+    "url": [
+      "https://www.php.net/distributions/php-{VERSION}.tar.gz"
+    ]
   },
   "nginx_http_flv_module": {
     "version": "1.2.13",
-    "url": "https://github.com/winshining/nginx-http-flv-module/archive/refs/tags/v{VERSION}.zip"
+    "url": [
+      "https://github.com/winshining/nginx-http-flv-module/archive/refs/tags/v{VERSION}.zip"
+    ]
+  },
+  "nginx_rtmp_module": {
+    "version": "1.2.2",
+    "url": [
+      "https://github.com/arut/nginx-rtmp-module/archive/refs/tags/v{VERSION}.tar.gz"
+    ]
+  },
+  "ioncube": {
+    "url": [
+      "https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_{ARCH}.tar.gz"
+    ]
+  },
+  "network_py": {
+    "url": [
+      "https://raw.githubusercontent.com/Vateron-Media/XC_VM/refs/heads/main/src/bin/network.py"
+    ]
   }
 }
