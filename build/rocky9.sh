@@ -404,6 +404,34 @@ install_ioncube_loader() {
     fi
 }
 
+# Enable Zend OPcache in php.ini.
+# OPcache is a Zend extension: --enable-opcache builds opcache.so into the
+# extension dir, but PHP never loads it unless php.ini carries an explicit
+# 'zend_extension=...opcache.so' line. The copied php.ini-development keeps that
+# line commented, so without this step 'php -m' omits "Zend OPcache" and
+# verify_php_extensions hard-fails. Registered AFTER install_ioncube_loader so
+# the ionCube loader stays the first zend_extension in php.ini.
+enable_opcache() {
+    log "Enabling Zend OPcache..."
+
+    local php_ini="$XC_VM_DIR/bin/php/lib/php.ini"
+    local ext_dir
+    ext_dir="$("$XC_VM_DIR/bin/php/bin/php-config" --extension-dir)"
+
+    if [[ ! -f "$ext_dir/opcache.so" ]]; then
+        warn "opcache.so not found in $ext_dir — was PHP built with --enable-opcache?"
+        return 0
+    fi
+
+    echo "zend_extension=$ext_dir/opcache.so" >> "$php_ini"
+
+    if "$XC_VM_DIR/bin/php/bin/php" -v 2>/dev/null | grep -qi 'Zend OPcache'; then
+        log "✓ Zend OPcache enabled ($ext_dir/opcache.so)"
+    else
+        warn "opcache.so registered but not detected by 'php -v' — check php.ini ordering"
+    fi
+}
+
 # Function to create network.py if it does not exist
 create_network_py() {
     # Prefer the host-mounted cache, fall back to GitHub.
@@ -514,6 +542,97 @@ build_php_extension() {
     rm -rf "$ext_build"
 }
 
+# _pecl_ext <pecl-package> <so-filename> — build/install one PECL extension and
+# register it in php.ini ONLY if its .so was actually produced. A failed build
+# must not leave a dangling "extension=" line: that triggers a PHP startup
+# warning on every run (e.g. "Unable to load dynamic library 'maxminddb.so'").
+# Missing extensions are surfaced loudly here and hard-failed by
+# verify_php_extensions. Relies on $pecl and $ext_dir set by the caller.
+_pecl_ext() {
+    local pkg="$1" so="$2"
+    log "Installing PHP extension: $pkg"
+    echo "yes" | "$pecl" install "$pkg" || warn "pecl install $pkg reported an error"
+    if [[ -f "$ext_dir/$so" ]]; then
+        echo "extension=$so" >> "$XC_VM_DIR/bin/php/lib/php.ini"
+        log "✓ $pkg installed ($ext_dir/$so)"
+    else
+        warn "✗ $pkg: $so not built/installed in $ext_dir — not adding to php.ini"
+    fi
+}
+
+# Install PHP extensions via PECL (maxminddb, ssh2, igbinary, redis).
+install_php_extensions() {
+    log "Installing PHP extensions..."
+    cd "$BUILD_DIR"
+
+    export PATH="$XC_VM_DIR/bin/php/bin:$PATH"
+
+    local pecl="$XC_VM_DIR/bin/php/bin/pecl"
+    if [[ ! -x "$pecl" ]]; then
+        warn "PECL not found at $pecl. Skipping extension installation."
+        return 0
+    fi
+
+    log "Installing extensions with PECL..."
+
+    local ext_dir
+    ext_dir="$("$XC_VM_DIR/bin/php/bin/php-config" --extension-dir)"
+    mkdir -p "$ext_dir"
+
+    # Update PECL channel to avoid protocol warnings
+    "$pecl" channel-update pecl.php.net || true
+
+    _pecl_ext maxminddb maxminddb.so
+    _pecl_ext ssh2      ssh2.so
+    _pecl_ext igbinary  igbinary.so
+    _pecl_ext redis     redis.so
+
+    log "PHP extensions installed"
+}
+
+# Verify that every PHP extension we expect is actually loaded. The PECL installs
+# above only warn on failure, so without this check a build can finish
+# "successfully" while silently missing extensions the application needs.
+verify_php_extensions() {
+    log "Verifying PHP extensions..."
+
+    local php_bin="$XC_VM_DIR/bin/php/bin/php"
+    [[ -x "$php_bin" ]] || error "PHP binary not found at $php_bin — cannot verify extensions"
+
+    # Names as printed by 'php -m' (matched case-insensitively, whole word).
+    # opcache shows up as "Zend OPcache". Covers both compiled-in (configure
+    # flags in build_php) and PECL-installed extensions.
+    local required=(
+        bcmath calendar curl exif gd gettext libxml mbstring mysqli
+        mysqlnd opcache openssl pcntl pdo_mysql shmop sockets sodium
+        sysvmsg sysvsem sysvshm xsl zlib
+        igbinary maxminddb redis ssh2
+    )
+
+    # Snapshot loaded modules once (lowercased) instead of spawning php per check.
+    local loaded
+    loaded="$("$php_bin" -m 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+
+    local missing=() ext
+    for ext in "${required[@]}"; do
+        grep -qiw -- "$ext" <<< "$loaded" || missing+=("$ext")
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        error "Missing PHP extensions: ${missing[*]} (full module list in $LOG_FILE)"
+    fi
+
+    log "✓ All ${#required[@]} required PHP extensions present"
+
+    # ionCube Loader is added to php.ini conditionally (per architecture);
+    # report its status without failing the build.
+    if grep -qw 'ioncube loader' <<< "$loaded"; then
+        log "✓ ionCube Loader present"
+    else
+        warn "ionCube Loader not loaded — ioncube_v1 modules will not run"
+    fi
+}
+
 # Main
 main() {
     log "Iniciando compilación de XC_VM para Rocky Linux 9"
@@ -531,7 +650,10 @@ main() {
     build_nginx_rtmp
     build_php
     install_ioncube_loader
+    enable_opcache
+    install_php_extensions
     build_php_extension
+    verify_php_extensions
     build_network_binary
 
     # Free temp build directory
