@@ -1,6 +1,6 @@
 {
   "_comment": "Versions are auto-updated by check_versions.sh. URLs are editable here by hand — all build scripts read them, so download links can be changed without touching any script. Each 'url' is an ordered mirror list, tried in turn. Placeholders: {VERSION}, {ARCH}.",
-  "_updated": "2026-06-22",
+  "_updated": "2026-07-06",
   "nginx": {
     "version": "1.31.2",
     "url": [
@@ -42,7 +42,7 @@
     ]
   },
   "nginx_http_flv_module": {
-    "version": "1.2.13",
+    "version": "1.2.14",
     "url": [
       "https://github.com/winshining/nginx-http-flv-module/archive/refs/tags/v{VERSION}.zip"
     ]
