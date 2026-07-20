@@ -1,8 +1,8 @@
 {
   "_comment": "Versions are auto-updated by check_versions.sh. URLs are editable here by hand — all build scripts read them, so download links can be changed without touching any script. Each 'url' is an ordered mirror list, tried in turn. Placeholders: {VERSION}, {ARCH}.",
-  "_updated": "2026-07-06",
+  "_updated": "2026-07-20",
   "nginx": {
-    "version": "1.31.2",
+    "version": "1.31.3",
     "url": [
       "https://nginx.org/download/nginx-{VERSION}.tar.gz",
       "https://github.com/nginx/nginx/releases/download/release-{VERSION}/nginx-{VERSION}.tar.gz"
