@@ -48,9 +48,10 @@ own PHP, and publishes a GitHub Release.
 
 This repo's only role is to **receive** those assets: `.github/workflows/sync-xcvm-core.yml`
 is triggered (repository_dispatch `xcvm_core_released`) by the extension repo's release,
-downloads the group archives with a private-read token (secret `XCVM_CORE_PAT`), commits them
-under `bin/xcvm_core/<version>/` (+ `SHA256SUMS`), and stamps `versions.json → "xcvm_core".version`
-(the single source of truth for the extension version). The private token stays in CI; customer
+downloads the group archives with a private-read token (secret `XCVM_CORE_PAT`), overwrites them
+flat under `bin/xcvm_core/` (fixed paths — no per-version dirs — plus `version.json` and
+`SHA256SUMS`), and stamps `versions.json → "xcvm_core".version` (the single source of truth for
+the extension version). The private token stays in CI; customer
 servers only ever see this public repo. Servers hot-swap the `.so` and reload php-fpm
 (`kill -USR2`). Token setup/rotation is documented in the extension repo's `docs/10-release-ci.md`.
 

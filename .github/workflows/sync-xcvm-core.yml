@@ -1,16 +1,17 @@
 name: Sync xcvm_core extension
 
 # Pulls freshly-built xcvm_core.so group archives from the PRIVATE extension repo's
-# GitHub Release and commits them into this public repo under bin/xcvm_core/<version>/.
+# GitHub Release and commits them into this public repo flat under bin/xcvm_core/.
 #
 # Split of responsibilities (the build itself lives in the private repo):
-#   private repo (XC_VM_CoreExtention) CI:  compiles the .so matrix (reusing this repo's
-#     build/ext.sh core), load-tests each OpenSSL-ABI group, and publishes a Release with
-#     assets xcvm_core-openssl1.1.tar.gz and xcvm_core-openssl3.tar.gz.
+#   private repo (XC_VM_CoreExtention):  builds the .so matrix, load-tests each
+#     OpenSSL-ABI group, and publishes a Release with the assets
+#     xcvm_core-openssl1.1.tar.gz and xcvm_core-openssl3.tar.gz.
 #   this workflow:  downloads those assets with a token that has READ access to the
-#     private repo (secret XCVM_CORE_PAT), lays them out under bin/xcvm_core/<version>/,
-#     regenerates SHA256SUMS, stamps versions.json, and commits. The private token never
-#     leaves CI — customer servers only ever see this PUBLIC repo/its releases.
+#     private repo (secret XCVM_CORE_PAT) and overwrites them flat under bin/xcvm_core/
+#     (fixed paths, no per-version dirs) plus version.json + SHA256SUMS, stamps
+#     versions.json, and commits. The private token never leaves CI — customer servers
+#     only ever see this PUBLIC repo/its releases.
 #
 # Trigger it from the private repo's release job with:
 #   curl -X POST -H "Authorization: Bearer <token-with-dispatch>" \
@@ -67,7 +68,7 @@ jobs:
           done
           ls -l _dl
 
-      - name: Stage into bin/xcvm_core/<version>/
+      - name: Stage into bin/xcvm_core/
         id: stage
         run: |
           set -euo pipefail
@@ -81,12 +82,16 @@ jobs:
           [ -n "$VER" ] || { echo "::error::could not determine version"; exit 1; }
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
 
-          DEST="bin/xcvm_core/$VER"
+          # Flat layout: the group archives live at a FIXED path and are overwritten each
+          # release (no per-version subdirectories). version.json next to them records the
+          # current version; SHA256SUMS carries the integrity hashes.
+          DEST="bin/xcvm_core"
           mkdir -p "$DEST"
           for g in $GROUPS; do
             cp "_dl/xcvm_core-$g.tar.gz" "$DEST/"
           done
           ( cd "$DEST" && sha256sum xcvm_core-*.tar.gz > SHA256SUMS )
+          printf '{\n  "version": "%s"\n}\n' "$VER" > "$DEST/version.json"
           echo "Staged:"; ls -l "$DEST"
 
       - name: Stamp versions.json
