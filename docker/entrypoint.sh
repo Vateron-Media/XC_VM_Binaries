@@ -160,20 +160,8 @@ else
     test_fail "php code execution failed"
 fi
 
-# 7. Private PHP extension (only checked when sources were mounted)
-if [[ -d "/build/ext_src" ]]; then
-    XCVM_EXT_DIR="$("$BIN_DIR/bin/php/bin/php-config" --extension-dir 2>/dev/null)"
-    if [[ -f "$XCVM_EXT_DIR/xcvm_core.so" ]]; then
-        test_pass "php extension: xcvm_core.so present"
-    else
-        test_fail "php extension: xcvm_core.so not found in $XCVM_EXT_DIR"
-    fi
-    if "$BIN_DIR/bin/php/bin/php" -d "extension=$XCVM_EXT_DIR/xcvm_core.so" -r 'echo "ok";' > /dev/null 2>&1; then
-        test_pass "php extension: xcvm_core.so loads"
-    else
-        test_fail "php extension: xcvm_core.so failed to load"
-    fi
-fi
+# The private PHP extension (xcvm_core) is not built or bundled here — it ships from
+# the XC_VM_CoreExtention repo and is delivered separately, so there is nothing to test.
 
 # ---------------------
 # Test Summary
@@ -245,9 +233,6 @@ rm -rf "$BIN_DIR/bin/php/lib/php/doc"  2>/dev/null || true
 rm -rf "$BIN_DIR/bin/php/lib/php/test" 2>/dev/null || true
 
 rm -f  "$BIN_DIR/bin/network.py"       2>/dev/null || true
-
-# Remove xcvm_core extension runtime config (created during load test)
-rm -rf "$BIN_DIR/config"               2>/dev/null || true
 
 # --- Remove old archive if exists ---
 if [[ -f "$OUT_DIR/$ARCHIVE_NAME" ]]; then

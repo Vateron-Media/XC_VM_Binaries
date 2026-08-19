@@ -8,11 +8,6 @@ DOCKER_DIR="$ROOT_DIR/docker"
 DOWNLOADS_DIR="$ROOT_DIR/downloads"
 VERSIONS_FILE="$ROOT_DIR/versions.json"
 
-# Path to PHP extension sources — stays outside this repo, never committed.
-# Overridable via the EXT_SRC_DIR env var; defaults to the XC_VM_CoreExtention repo
-# checked out alongside this one.
-EXT_SRC_DIR="${EXT_SRC_DIR:-$ROOT_DIR/../XC_VM_CoreExtention/extension}"
-
 mkdir -p "$OUT_DIR" "$LOG_DIR" "$DOWNLOADS_DIR"
 
 # ----------------------
@@ -137,13 +132,6 @@ build() {
         return 0
     fi
 
-    local ext_args=()
-    if [ -d "$EXT_SRC_DIR" ]; then
-        ext_args=(-v "$EXT_SRC_DIR:/build/ext_src:ro")
-    else
-        echo "[WARN] Extension sources not found at $EXT_SRC_DIR — license_ext will be skipped"
-    fi
-
     echo ">>> IMAGE: $name (log: $logfile)"
 
     docker build \
@@ -158,7 +146,6 @@ build() {
         -e TARGET="$target" \
         -v "$OUT_DIR:/build/out" \
         -v "$DOWNLOADS_DIR:/build/downloads:ro" \
-        "${ext_args[@]}" \
         "xcvm-builder:$name" 2>&1 | tee -a "$logfile"
 
     echo ">>> Log saved: $logfile"
@@ -214,13 +201,6 @@ build_rocky() {
         return 0
     fi
 
-    local ext_args=()
-    if [ -d "$EXT_SRC_DIR" ]; then
-        ext_args=(-v "$EXT_SRC_DIR:/build/ext_src:ro")
-    else
-        echo "[WARN] Extension sources not found at $EXT_SRC_DIR — license_ext will be skipped"
-    fi
-
     echo ">>> IMAGE: rocky9 (log: $logfile)"
 
     docker build \
@@ -234,7 +214,6 @@ build_rocky() {
         -e TARGET=rocky_9 \
         -v "$OUT_DIR:/build/out" \
         -v "$DOWNLOADS_DIR:/build/downloads:ro" \
-        "${ext_args[@]}" \
         xcvm-builder:rocky9 2>&1 | tee -a "$logfile"
 
     echo ">>> Log saved: $logfile"

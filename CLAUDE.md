@@ -5,9 +5,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 A Docker-based, host-isolated build system that compiles XC_VM runtime **binaries** —
-`nginx`, `nginx_rtmp` (RTMP/FLV), and `php-fpm 8.1` (with ionCube, OPcache, and a private
-`xcvm_core` extension) — for several Linux distributions. There is no application source code
-here; the deliverable is one self-contained `out/<target>.tar.gz` per distribution.
+`nginx`, `nginx_rtmp` (RTMP/FLV), and `php-fpm 8.1` (with ionCube and OPcache) — for several
+Linux distributions. There is no application source code here; the deliverable is one
+self-contained `out/<target>.tar.gz` per distribution. The private `xcvm_core` PHP extension
+is **not** built or bundled here — it is compiled/released from the `XC_VM_CoreExtention` repo
+and delivered separately (see below).
 
 ## Common commands
 
@@ -41,7 +43,7 @@ the tiny `.so` changes. **The build lives in the private extension repo**
 this repo's published runtime archives (`bin/php` inside `<target>.tar.gz` — no PHP recompile),
 compiles one `.so` **per OpenSSL-ABI group** on the group's oldest-glibc member
 (`openssl1.1` = debian11/ubuntu20 built on debian11; `openssl3` =
-rocky9/ubuntu22/debian12/ubuntu24/debian13 built on rocky9), load-tests each on every member's
+ubuntu22/debian12/ubuntu24/debian13 built on ubuntu22), load-tests each on every member's
 own PHP, and publishes a GitHub Release.
 
 This repo's only role is to **receive** those assets: `.github/workflows/sync-xcvm-core.yml`
@@ -58,8 +60,8 @@ The only "tests" are binary-validation checks baked into `docker/entrypoint.sh`,
 container after compilation and **before** packaging. If any check fails the build aborts and no
 archive is produced. They verify each binary exists, reports a sane version, and includes required
 modules/extensions (nginx http_ssl/v2/realip/etc., RTMP/FLV module, PHP `curl`/`mbstring`/`pdo_mysql`/
-`gd`/`opcache`/`sodium`/…, and `xcvm_core.so` when extension sources are mounted). To exercise them,
-run a build for the relevant target.
+`gd`/`opcache`/`sodium`/…). The `xcvm_core` extension is not built here, so it is not among these
+checks. To exercise them, run a build for the relevant target.
 
 ## Architecture / control flow
 
@@ -86,12 +88,12 @@ Key conventions to preserve when editing:
 - **Build output goes to `/home/xc_vm/bin/{nginx,nginx_rtmp,php}/`** inside the container; the host's
   `out/` is bind-mounted to `/build/out` to receive the archive.
 
-- **Private PHP extension (`xcvm_core`)** sources are *not* in this repo. `build_all.sh` mounts
-  `$EXT_SRC_DIR` (default `../XC_VM_CoreExtention/extension`, overridable via the `EXT_SRC_DIR` env var)
-  read-only at `/build/ext_src`. If absent, the extension is skipped with a warning rather than failing.
+- **Private PHP extension (`xcvm_core`)** is neither built nor bundled here (see the section
+  "The xcvm_core extension is built elsewhere" above). The runtime build only produces the PHP
+  toolchain (`phpize`/`php-config`/headers) that the extension repo later compiles against.
 
-- **PHP extension ordering matters**: in `build/all.sh::main`, ionCube loads first, then OPcache, then
-  other extensions — this order is reflected in php.ini and must be kept.
+- **PHP extension ordering matters**: in `build/all.sh::main`, ionCube loads first, then OPcache —
+  this order is reflected in php.ini and must be kept.
 
 ## Adding a new distribution
 
