@@ -357,9 +357,9 @@ build_php() {
 }
 
 # Install the ionCube Loader. Required at runtime for ioncube_v1 modules
-# (IonCube-encoded PHP). The loader is a Zend extension and MUST load BEFORE
-# xcvm_core.so — registered here right after build_php so it is the first
-# (zend_)extension line in php.ini.
+# (IonCube-encoded PHP). The loader is a Zend extension and MUST load BEFORE the
+# separately-delivered xcvm_core.so — registered here right after build_php so it is
+# the first (zend_)extension line in php.ini.
 install_ioncube_loader() {
     log "Installing ionCube Loader..."
     cd "$BUILD_DIR"
@@ -500,66 +500,10 @@ build_network_binary() {
     fi
 }
 
-# Build the private PHP extension (sources mounted at /build/ext_src)
-build_php_extension() {
-    local ext_src="/build/ext_src"
-    if [[ ! -d "$ext_src" ]]; then
-        warn "Extension sources not mounted at $ext_src — skipping xcvm_core build"
-        return 0
-    fi
-
-    log "Building PHP extension (xcvm_core)..."
-
-    local phpize="$XC_VM_DIR/bin/php/bin/phpize"
-    local php_config="$XC_VM_DIR/bin/php/bin/php-config"
-
-    if [[ ! -x "$phpize" ]]; then
-        warn "phpize not found at $phpize — skipping extension build"
-        return 0
-    fi
-
-    local ext_build="/tmp/xcvm_core_build"
-    rm -rf "$ext_build"
-    cp -r "$ext_src" "$ext_build"
-    cd "$ext_build"
-
-    "$phpize"
-    ./configure --with-php-config="$php_config" --enable-xcvm_core
-    make build-modules
-
-    local ext_dir
-    ext_dir="$("$php_config" --extension-dir)"
-    cp modules/xcvm_core.so "$ext_dir/"
-    chmod 0755 "$ext_dir/xcvm_core.so"
-
-    # Verify the extension actually loads
-    if "$XC_VM_DIR/bin/php/bin/php" -d "extension=$ext_dir/xcvm_core.so" -r 'echo "ok";' > /dev/null 2>&1; then
-        log "✓ xcvm_core.so installed and loads correctly ($ext_dir)"
-    else
-        warn "xcvm_core.so installed but failed to load — check dependencies"
-    fi
-
-    # Register xcvm_core in php.ini (after the ionCube zend_extension, which must
-    # stay first) and stamp the SaaS endpoint. The endpoint is an ENCRYPTED blob
-    # from tools/xcvm_url_vault.py (AES-256-GCM, key baked into xcvm_core.so): a
-    # plaintext URL here is ignored and the extension uses its built-in default,
-    # so it cannot be swapped for a rogue server without the build secret. Point a
-    # build at a different endpoint via XCVM_SERVER_URL_ENC (regenerate with
-    # `xcvm_url_vault.py encrypt <url>`).
-    local php_ini="$XC_VM_DIR/bin/php/lib/php.ini"
-    if ! grep -q '^extension=xcvm_core.so' "$php_ini" 2>/dev/null; then
-        echo "extension=xcvm_core.so" >> "$php_ini"
-        log "✓ xcvm_core.so registered in php.ini"
-    fi
-    # Default = encrypted "https://www.xcvm.tech" (same as the .so's baked-in URL).
-    local url_enc="${XCVM_SERVER_URL_ENC:-4838dU01gwDZCPyGpmaYP2PIqWmrM3IgzCMQu3IGYOIuKHMDqLDLcHdpKyxi3SCYa3KTi40=}"
-    if ! grep -q '^xcvm_core.server_url' "$php_ini" 2>/dev/null; then
-        echo "xcvm_core.server_url=\"$url_enc\"" >> "$php_ini"
-        log "✓ xcvm_core.server_url stamped in php.ini"
-    fi
-
-    rm -rf "$ext_build"
-}
+# NOTE: the private PHP extension (xcvm_core) is NOT built here. It is compiled and
+# released from the XC_VM_CoreExtention repo and delivered separately (bin/xcvm_core/,
+# see CLAUDE.md). This runtime build only provides the PHP toolchain the extension is
+# later compiled against.
 
 # _pecl_ext <pecl-package> <so-filename> — build/install one PECL extension and
 # register it in php.ini ONLY if its .so was actually produced. A failed build
@@ -671,7 +615,6 @@ main() {
     install_ioncube_loader
     enable_opcache
     install_php_extensions
-    build_php_extension
     verify_php_extensions
     build_network_binary
 

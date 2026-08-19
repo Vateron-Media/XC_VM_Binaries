@@ -71,8 +71,9 @@ jobs:
         id: stage
         run: |
           set -euo pipefail
-          # Version = release tag without a leading v. Prefer the VERSION baked into the
-          # first archive if present (authoritative), else fall back to the tag.
+          # Version comes from the archive's VERSION file (authoritative). The extension
+          # repo tags releases as the BARE version (no "v" prefix), so the tag is a valid
+          # fallback as-is; the ${TAG#v} strip is just defensive in case that ever changes.
           VER="${TAG#v}"
           tar -xzf "_dl/xcvm_core-openssl3.tar.gz" -C _dl VERSION 2>/dev/null || \
           tar -xzf "_dl/xcvm_core-openssl1.1.tar.gz" -C _dl VERSION 2>/dev/null || true
