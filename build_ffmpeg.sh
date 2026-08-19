@@ -1,698 +1,470 @@
 #!/bin/bash
 set -euo pipefail
 # ──────────────────────────────────────────────────────────────────────────────
-# XC_VM FFmpeg Auto-Builder - FINAL FULL COMPLETE VERSION 2026 (ENGLISH)
+# XC_VM FFmpeg static builder
 #
-# This is the longest and most complete version.
-# Everything is expanded (no shortcuts, no "...").
-# Features included:
-#   - DASH complete
-#   - DRM + VAAPI
-#   - Full AV1 (aom + dav1d + svtav1 + rav1e)
-#   - libzimg + libvmaf
-#   - Vulkan + libplacebo
-#   - Subtitles PRO (fribidi + harfbuzz + zvbi)
-#   - --force-gpu flag for Docker (GPU support retained even without CUDA at build)
-#   - 100% compatible with XUI / Xtream UI / XC_VM
-#   - Static libs + dynamic glibc (no segfaults)
+# Builds a *portable* FFmpeg 8.1 + ffprobe where every codec/library is compiled
+# from source as a static .a and linked INTO the binary. The only dynamic
+# dependencies left are the glibc family (libc/libm/libpthread/libdl/librt) plus
+# libgcc_s — present on every Linux host. No libx264.so / libx265.so / etc. is
+# ever looked up on the target system.
 #
-# Usage:
-# ./build_ffmpeg.sh --force-gpu --install
-# ./build_ffmpeg.sh 8.1 --force-gpu --install
+# Why this exists: the previous version installed distro -dev packages (which on
+# Debian/Ubuntu ship only shared .so) and relied on --pkg-config-flags=--static.
+# With no .a available the linker silently fell back to .so, producing a binary
+# that needed libx264.so & friends at runtime — libraries absent on the deploy
+# host. This rewrite removes that failure mode entirely and verifies the result.
+#
+# Intended to run as root inside a clean Debian 11 container (old glibc → forward
+# compatible). See docker/ffmpeg/Dockerfile and `./build_all.sh ffmpeg`.
+#
+# Output: $OUT_DIR/ffmpeg, $OUT_DIR/ffprobe, $OUT_DIR/ffmpeg.tar.gz
 # ──────────────────────────────────────────────────────────────────────────────
 
-declare -A FFMPEG_TAGS=(
-    ["4.0"]="n4.0.6"
-    ["7.1"]="n7.1.1"
-    ["8.0"]="n8.0"
-    ["8.1"]="n8.1"
-)
+# ── Versions (single place to bump; kept here rather than versions.json because
+#    none of these are tracked by check_versions.sh) ───────────────────────────
+V_ZLIB="1.3.1"
+V_BZIP2="1.0.8"
+V_OPENSSL="3.4.1"
+V_EXPAT="2.6.4"          # tag R_2_6_4
+V_FREETYPE="2.13.3"
+V_FRIBIDI="1.0.16"
+V_HARFBUZZ="10.2.0"
+V_FONTCONFIG="2.16.0"
+V_LIBASS="0.17.3"
+V_X265="4.1"
+V_VPX="1.15.0"
+V_AOM="3.11.0"           # git tag
+V_DAV1D="1.5.1"
+V_OPUS="1.5.2"
+V_LAME="3.100"
+V_FDKAAC="2.0.3"
+V_OGG="1.3.5"
+V_VORBIS="1.3.7"
+V_THEORA="1.1.1"
+V_FFMPEG="${V_FFMPEG:-8.1}"   # release tarball (== git tag nX.Y); override: V_FFMPEG=7.1
+# Label for the output archive / release asset (the panel's ffmpeg_bin/<label> dir).
+# Defaults to the built version; override when the panel dir name differs, e.g.
+# FF_LABEL=8.0 while building FFmpeg 8.1.
+FF_LABEL="${FF_LABEL:-$V_FFMPEG}"
 
-ALL_VERSIONS=("4.0" "7.1" "8.0" "8.1")
-
-declare -A NVCODEC_BRANCH=(
-    ["4.0"]="sdk/11.1"
-    ["7.1"]="sdk/12.2"
-    ["8.0"]="sdk/12.2"
-    ["8.1"]="sdk/12.2"
-)
-
-BUILD_DIR="/tmp/ffmpeg_build"
-PREFIX_BASE="/tmp/ffmpeg_install"
+# ── Paths ─────────────────────────────────────────────────────────────────────
+DEPS_PREFIX="/opt/ffmpeg_deps"          # static libs land here
+FF_PREFIX="/opt/ffmpeg_build"           # ffmpeg install prefix
+SRC_DIR="/tmp/ffmpeg_src"               # extracted sources
+DL_DIR="/tmp/ffmpeg_dl"                 # downloaded archives (cache)
+OUT_DIR="${OUT_DIR:-$(cd "$(dirname "$0")" && pwd)/out}"
 NPROC="$(nproc)"
-INSTALL_DIR=""
-DO_INSTALL=false
-VERBOSE=false
-FORCE_GPU=false
+JOBS="-j${NPROC}"
 
-# ── Colors ────────────────────────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+# ── Logging ────────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+msg()  { echo -e "${GREEN}[*]${NC} $*"; }
+step() { echo -e "${CYAN}[==]${NC} $*"; }
+warn() { echo -e "${YELLOW}[!]${NC} $*"; }
+die()  { echo -e "${RED}[x]${NC} $*" >&2; exit 1; }
 
-log_info() { echo -e "${GREEN}[INFO]${NC} $*"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
-log_step()  { echo -e "${CYAN}[STEP]${NC} $*"; }
+# ── Build environment: make every tool prefer our static prefix ────────────────
+export PATH="$DEPS_PREFIX/bin:$PATH"
+export PKG_CONFIG_PATH="$DEPS_PREFIX/lib/pkgconfig:$DEPS_PREFIX/lib64/pkgconfig"
+export CFLAGS="-I$DEPS_PREFIX/include -O2 -fPIC"
+export CXXFLAGS="$CFLAGS"
+export LDFLAGS="-L$DEPS_PREFIX/lib -L$DEPS_PREFIX/lib64"
 
-# Compare versions: returns 0 if $1 >= $2
-version_ge() {
-    [[ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]
-}
+mkdir -p "$DEPS_PREFIX" "$FF_PREFIX" "$SRC_DIR" "$DL_DIR" "$OUT_DIR"
 
-# ── Detect XC_VM install dir ─────────────────────────────────────────────────
-detect_xc_vm_bin_dir() {
-    local candidates=(
-        "/home/xc_vm/bin/ffmpeg_bin"
-        "/opt/xc_vm/bin/ffmpeg_bin"
-    )
-    for dir in "${candidates[@]}"; do
-        if [[ -d "$dir" ]]; then
-            echo "$dir"
+# ── Helpers ────────────────────────────────────────────────────────────────────
+# dl <dest> <url> [mirror...] — download with retries, skip if already cached.
+dl() {
+    local out="$1"; shift
+    if [[ -f "$out" && "$(stat -c%s "$out" 2>/dev/null || echo 0)" -ge 1024 ]]; then
+        return 0
+    fi
+    local u
+    for u in "$@"; do
+        msg "GET $(basename "$out") <- $u"
+        if wget -q --timeout=30 --connect-timeout=15 --tries=2 -O "$out" "$u"; then
             return 0
         fi
+        rm -f "$out"
     done
-    return 1
+    die "download failed: $(basename "$out")"
 }
 
-# ── Argument parsing ─────────────────────────────────────────────────────────
-VERSIONS_TO_BUILD=()
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --install)
-            DO_INSTALL=true
-            shift
-            ;;
-        --install-dir)
-            INSTALL_DIR="$2"
-            DO_INSTALL=true
-            shift 2
-            ;;
-        --verbose|-v)
-            VERBOSE=true
-            shift
-            ;;
-        --force-gpu)
-            FORCE_GPU=true
-            log_info "FORCE_GPU mode activated - GPU support will be built even without real CUDA"
-            shift
-            ;;
-        --help|-h)
-            echo "Usage: $0 [--install] [--install-dir PATH] [--force-gpu] [VERSION...]"
-            echo "Available versions: ${ALL_VERSIONS[*]}"
-            exit 0
-            ;;
-        *)
-            if [[ -n "${FFMPEG_TAGS[$1]+x}" ]]; then
-                VERSIONS_TO_BUILD+=("$1")
-            else
-                log_error "Unknown version: $1. Available: ${ALL_VERSIONS[*]}"
-                exit 1
-            fi
-            shift
-            ;;
-    esac
-done
+# fetch <archive-name> <url> [mirror...] — download + extract into $SRC_DIR.
+# Sets global SRC to the extracted top-level directory.
+fetch() {
+    local fname="$1"; shift
+    local arch="$DL_DIR/$fname"
+    dl "$arch" "$@"
+    local top
+    top="$(tar tf "$arch" 2>/dev/null | head -1 | cut -d/ -f1)"
+    [[ -n "$top" ]] || die "cannot determine top dir of $fname"
+    rm -rf "${SRC_DIR:?}/$top"
+    tar xf "$arch" -C "$SRC_DIR"
+    SRC="$SRC_DIR/$top"
+}
 
-if [[ ${#VERSIONS_TO_BUILD[@]} -eq 0 ]]; then
-    VERSIONS_TO_BUILD=("${ALL_VERSIONS[@]}")
-fi
-
-if [[ "$DO_INSTALL" == true && -z "$INSTALL_DIR" ]]; then
-    INSTALL_DIR="$(detect_xc_vm_bin_dir)" || {
-        log_error "Cannot detect XC_VM bin dir. Use --install-dir PATH"
-        exit 1
-    }
-fi
-
-# ── Helper: install first available package from alternatives ─────────────────
-# Usage: install_one_of_apt pkg1 pkg2 pkg3
-# Tries each in order, installs the first one that exists.
-install_one_of_apt() {
-    for pkg in "$@"; do
-        if apt-cache show "$pkg" 2>/dev/null | grep -q "^Package:"; then
-            apt-get install -y -qq "$pkg" 2>/dev/null && return 0
+# git_fetch <dir> <branch> <url> [mirror...] — shallow clone. Sets global SRC.
+git_fetch() {
+    local dir="$1" branch="$2"; shift 2
+    SRC="$SRC_DIR/$dir"
+    [[ -d "$SRC/.git" ]] && { msg "cached clone: $dir"; return 0; }
+    rm -rf "$SRC"
+    local u
+    for u in "$@"; do
+        msg "CLONE $dir ($branch) <- $u"
+        if git clone --depth 1 --branch "$branch" "$u" "$SRC" 2>/dev/null; then
+            return 0
         fi
+        rm -rf "$SRC"
     done
-    return 1
+    die "clone failed: $dir"
 }
 
-# ── Dependency installation (APT) ────────────────────────────────────────────
-install_deps_apt() {
-    log_step "Installing build dependencies (APT)..."
+# done_stamp / is_done — let the script be re-run on a host without rebuilding
+# everything. (In the one-shot container this is a no-op.)
+is_done()   { [[ -f "$DEPS_PREFIX/.done-$1" ]]; }
+done_stamp(){ touch "$DEPS_PREFIX/.done-$1"; }
+
+# build <name> <body-fn> — wraps stamp handling + section banner.
+build() {
+    local name="$1" fn="$2"
+    if is_done "$name"; then msg "skip $name (already built)"; return 0; fi
+    step "Building $name"
+    "$fn"
+    done_stamp "$name"
+}
+
+# ── Build-tool installation (Debian) ───────────────────────────────────────────
+install_build_tools() {
+    step "Installing build tools (APT)"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-
-    # Required — build is impossible without these
-    local required=(
-        build-essential nasm yasm pkg-config git cmake autoconf automake libtool
-        libx264-dev libx265-dev libmp3lame-dev libopus-dev libvpx-dev
-        libfreetype-dev libfontconfig-dev libssl-dev zlib1g-dev libbz2-dev
-    )
-    apt-get install -y -qq "${required[@]}"
-
-    # Optional — install one by one, skip unavailable
-    local optional=(
-        # Codecs
-        libfdk-aac-dev libtheora-dev libvorbis-dev libwebp-dev libxvidcore-dev
-        # Subtitles / text rendering
-        libass-dev libfribidi-dev libharfbuzz-dev
-        # TLS / crypto
-        libgnutls28-dev libgmp-dev libunistring-dev
-        # Streaming protocols
-        librtmp-dev libxml2-dev
-        # Transitive deps for --pkg-config-flags=--static
-        # (x265→numa, gnutls→nettle, libxml2→lzma+icu)
-        libnuma-dev liblzma-dev libicu-dev
-        # AV1
-        libaom-dev libdav1d-dev libsvtav1-dev librav1e-dev
-        # Quality / scaling
-        libvmaf-dev libzimg-dev
-        # DRM / VAAPI
-        libdrm-dev libva-dev
-        # Vulkan
-        libvulkan-dev libplacebo-dev
-        # Teletext
-        libzvbi-dev
-    )
-
-    local failed_pkgs=()
-    for pkg in "${optional[@]}"; do
-        if ! apt-get install -y -qq "$pkg" 2>/dev/null; then
-            failed_pkgs+=("$pkg")
-        fi
-    done
-
-    # Packages with alternative names depending on distro
-    local alt_failed=()
-    install_one_of_apt libnettle-dev nettle-dev || alt_failed+=("nettle-dev")
-    install_one_of_apt libsrt-gnutls-dev libsrt-openssl-dev libsrt-dev || alt_failed+=("libsrt-dev")
-
-    if [[ ${#failed_pkgs[@]} -gt 0 || ${#alt_failed[@]} -gt 0 ]]; then
-        log_warn "Optional packages not available: ${failed_pkgs[*]} ${alt_failed[*]}"
-        log_warn "Some codecs/features may be disabled in the build"
-    fi
-    log_info "Dependencies installed (APT)"
+    apt-get install -y -qq --no-install-recommends \
+        build-essential yasm nasm cmake git pkg-config \
+        autoconf automake libtool gperf texinfo \
+        wget tar xz-utils unzip ca-certificates \
+        python3 python3-pip ninja-build perl
+    # Debian 11 ships meson 0.56; some recent libs want newer — use a fresh pip one.
+    pip3 install --quiet --upgrade meson ninja
+    hash -r
+    msg "Tool versions: $(gcc -dumpversion) / nasm $(nasm -v | awk '{print $3}') / meson $(meson --version) / cmake $(cmake --version | head -1 | awk '{print $3}')"
 }
 
-# ── Dependency installation (DNF/YUM) ────────────────────────────────────────
-install_deps_dnf() {
-    log_step "Installing build dependencies (DNF/YUM)..."
-    local mgr="dnf"
-    command -v dnf &>/dev/null || mgr="yum"
-    $mgr install -y epel-release 2>/dev/null || true
-
-    # RPM Fusion needed for x264/x265/fdk-aac
-    if ! $mgr repolist 2>/dev/null | grep -qi rpmfusion; then
-        log_warn "RPM Fusion not enabled — x264/x265/fdk-aac may be unavailable"
-    fi
-
-    local required=(
-        gcc gcc-c++ make nasm yasm pkgconfig git cmake autoconf automake libtool
-        zlib-devel bzip2-devel openssl-devel freetype-devel fontconfig-devel
-    )
-    $mgr install -y "${required[@]}"
-
-    local optional=(
-        # Codecs
-        x264-devel x265-devel fdk-aac-devel lame-devel opus-devel libvpx-devel
-        libtheora-devel libvorbis-devel libwebp-devel xvidcore-devel
-        # Subtitles / text
-        libass-devel fribidi-devel harfbuzz-devel
-        # TLS / crypto
-        gnutls-devel gmp-devel libunistring-devel nettle-devel
-        # Streaming protocols
-        librtmp-devel libxml2-devel srt-devel
-        # Transitive deps
-        numactl-devel xz-devel libicu-devel
-        # AV1
-        aom-devel dav1d-devel svt-av1-devel rav1e-devel
-        # Quality / scaling
-        vmaf-devel zimg-devel
-        # DRM / VAAPI
-        libdrm-devel libva-devel
-        # Vulkan
-        vulkan-devel libplacebo-devel
-        # Teletext
-        libzvbi-devel
-    )
-
-    local failed_pkgs=()
-    for pkg in "${optional[@]}"; do
-        if ! $mgr install -y "$pkg" 2>/dev/null; then
-            failed_pkgs+=("$pkg")
-        fi
-    done
-
-    if [[ ${#failed_pkgs[@]} -gt 0 ]]; then
-        log_warn "Optional packages not available: ${failed_pkgs[*]}"
-        log_warn "Some codecs/features may be disabled in the build"
-    fi
-    log_info "Dependencies installed (${mgr^^})"
+# ── Generic build recipes ──────────────────────────────────────────────────────
+autotools() { ./configure --prefix="$DEPS_PREFIX" --enable-static --disable-shared "$@" && make $JOBS && make install; }
+cmake_static() {
+    local src="$1"; shift
+    mkdir -p build && cd build
+    cmake -G "Unix Makefiles" -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" -DCMAKE_INSTALL_LIBDIR=lib \
+        -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        "$@" "$src"
+    make $JOBS && make install
+}
+meson_static() {
+    meson setup build --prefix="$DEPS_PREFIX" --libdir=lib --buildtype=release \
+        --default-library=static "$@"
+    ninja -C build && ninja -C build install
 }
 
-# ── CUDA detection (with FORCE_GPU support) ──────────────────────────────────
-HAS_CUDA=false
-CUDA_HOME=""
-detect_cuda() {
-    if [[ "$FORCE_GPU" == true ]]; then
-        HAS_CUDA=true
-        log_info "FORCE_GPU mode active - GPU support will be compiled"
-        return 0
-    fi
-    local cuda_paths=(
-        "/usr/local/cuda"
-        "/usr/local/cuda-12"
-        "/usr/local/cuda-11"
-    )
-    for p in "${cuda_paths[@]}"; do
-        if [[ -d "$p/include" && -f "$p/bin/nvcc" ]]; then
-            CUDA_HOME="$p"
-            HAS_CUDA=true
-            log_info "CUDA found: $CUDA_HOME"
-            return 0
-        fi
-    done
-    if command -v nvcc &>/dev/null; then
-        CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
-        HAS_CUDA=true
-        log_info "CUDA found via PATH"
-        return 0
-    fi
-    log_warn "CUDA not found"
+# ── Dependency builds (order matters: deps before dependents) ──────────────────
+b_zlib() {
+    fetch "zlib-${V_ZLIB}.tar.gz" \
+        "https://zlib.net/zlib-${V_ZLIB}.tar.gz" \
+        "https://github.com/madler/zlib/releases/download/v${V_ZLIB}/zlib-${V_ZLIB}.tar.gz"
+    cd "$SRC"; ./configure --prefix="$DEPS_PREFIX" --static; make $JOBS; make install
 }
 
-# ── Install nv-codec-headers ─────────────────────────────────────────────────
-install_nvcodec_headers() {
-    local branch="$1"
-    local nvcodec_dir="${BUILD_DIR}/nv-codec-headers-${branch//\//_}"
-    if [[ -d "$nvcodec_dir" ]]; then
-        return 0
-    fi
-    log_step "Installing nv-codec-headers ($branch)..."
-
-    local mirrors=(
-        "https://github.com/FFmpeg/nv-codec-headers.git"
-        "https://git.videolan.org/git/ffmpeg/nv-codec-headers.git"
-    )
-    local clone_ok=false
-    for url in "${mirrors[@]}"; do
-        log_info "Trying mirror: $url"
-        if git clone --depth 1 --branch "$branch" "$url" "$nvcodec_dir" 2>/dev/null; then
-            clone_ok=true
-            break
-        fi
-        rm -rf "$nvcodec_dir" 2>/dev/null || true
-    done
-
-    if [[ "$clone_ok" != true ]]; then
-        log_error "Failed to clone nv-codec-headers ($branch) from all mirrors"
-        return 1
-    fi
-
-    pushd "$nvcodec_dir" > /dev/null
-    make install PREFIX="/usr/local"
-    popd > /dev/null
-    ldconfig 2>/dev/null || true
+b_bzip2() {
+    fetch "bzip2-${V_BZIP2}.tar.gz" \
+        "https://sourceware.org/pub/bzip2/bzip2-${V_BZIP2}.tar.gz"
+    cd "$SRC"
+    make $JOBS libbz2.a CFLAGS="-fPIC -O2 -D_FILE_OFFSET_BITS=64"
+    make install PREFIX="$DEPS_PREFIX"
 }
 
-# ── Helper: check pkg-config and append flag ─────────────────────────────────
-# Usage: pkg_enable <pkg-config-name> <--enable-flag> [min-version]
-pkg_enable() {
-    local pkg="$1" flag="$2" min_ver="${3:-}"
-    if [[ -n "$min_ver" ]]; then
-        pkg-config --atleast-version="$min_ver" "$pkg" 2>/dev/null && CONFIGURE_FLAGS+=("$flag")
-    else
-        pkg-config --exists "$pkg" 2>/dev/null && CONFIGURE_FLAGS+=("$flag")
-    fi
+b_openssl() {
+    fetch "openssl-${V_OPENSSL}.tar.gz" \
+        "https://github.com/openssl/openssl/releases/download/openssl-${V_OPENSSL}/openssl-${V_OPENSSL}.tar.gz"
+    cd "$SRC"
+    ./Configure no-shared no-tests --prefix="$DEPS_PREFIX" --libdir=lib \
+        --openssldir="$DEPS_PREFIX/ssl" linux-x86_64
+    make $JOBS; make install_sw
 }
 
-CONFIGURE_FLAGS=()
-get_configure_flags() {
-    local version="$1"
-    local prefix="$2"
-    local cuda_cflags=""
-    local cuda_ldflags=""
-    if [[ "$HAS_CUDA" == true && -n "$CUDA_HOME" ]]; then
-        cuda_cflags=" -I${CUDA_HOME}/include"
-        cuda_ldflags=" -L${CUDA_HOME}/lib64"
-    fi
-
-    CONFIGURE_FLAGS=(
-        "--prefix=${prefix}"
-        "--bindir=${prefix}/bin"
-        "--pkg-config-flags=--static"
-        "--extra-cflags=-I${prefix}/include${cuda_cflags}"
-        "--extra-ldflags=-L${prefix}/lib${cuda_ldflags} -Wl,-Bstatic -lcrypto -lssl -Wl,-Bdynamic"
-        "--extra-version=XCVM-$(date +%Y%m%d)"
-        "--extra-libs=-lsupc++ -lgmp -lz -lunistring -lpthread -lm -lrt -ldl"
-        "--target-os=linux"
-        "--enable-static"
-        "--disable-shared"
-        "--disable-ffplay"
-        "--disable-doc"
-        "--disable-debug"
-        "--disable-autodetect"
-        "--enable-gpl"
-        "--enable-nonfree"
-        "--enable-version3"
-        "--enable-pthreads"
-        "--enable-runtime-cpudetect"
-        "--enable-gray"
-        "--enable-libx264"
-        "--enable-libx265"
-        "--enable-libmp3lame"
-        "--enable-libopus"
-        "--enable-libvpx"
-        "--enable-libvorbis"
-        "--enable-libtheora"
-        "--enable-libass"
-        "--enable-libfreetype"
-        "--enable-fontconfig"
-        "--enable-bzlib"
-        "--enable-zlib"
-        "--enable-librtmp"
-        "--enable-gnutls"
-
-        # HLS — critical for IPTV streaming
-        "--enable-muxer=hls"
-        "--enable-demuxer=hls"
-
-        # DASH muxer/demuxer
-        "--enable-muxer=dash"
-        "--enable-demuxer=dash"
-
-        # Disable ALSA on headless servers
-        "--disable-alsa"
-        "--disable-indev=alsa"
-        "--disable-outdev=alsa"
-    )
-
-    # === Features enabled for ALL versions (no version gate needed) ===
-    pkg_enable libxml-2.0   "--enable-libxml2"
-    pkg_enable libdrm       "--enable-libdrm"
-    pkg_enable libva        "--enable-vaapi"
-    pkg_enable aom          "--enable-libaom"
-    pkg_enable zimg         "--enable-libzimg"
-    pkg_enable libwebp      "--enable-libwebp"
-    pkg_enable fribidi      "--enable-libfribidi"
-    pkg_enable zvbi-0.2     "--enable-libzvbi"
-    # libsrt — newer SRT (≥ 1.4.2) removed srt_socket(); FFmpeg updated in ~4.4
-    version_ge "$version" "4.4" && pkg_enable srt "--enable-libsrt"
-    [[ -f /usr/include/xvid.h ]] && CONFIGURE_FLAGS+=("--enable-libxvid")
-
-    # === libvmaf — API v2 requires FFmpeg >= 5.0 ===
-    if pkg-config --exists libvmaf 2>/dev/null; then
-        local vmaf_major
-        vmaf_major="$(pkg-config --modversion libvmaf 2>/dev/null | cut -d. -f1)"
-        if [[ "${vmaf_major:-0}" -ge 2 ]] && ! version_ge "$version" "5.0"; then
-            log_warn "libvmaf v${vmaf_major} API requires FFmpeg >= 5.0, skipping for ${version}"
-        else
-            CONFIGURE_FLAGS+=("--enable-libvmaf")
-        fi
-    fi
-
-    # === fdk-aac — API v2 requires FFmpeg >= 4.2 ===
-    if pkg-config --exists fdk-aac 2>/dev/null; then
-        local fdk_major
-        fdk_major="$(pkg-config --modversion fdk-aac 2>/dev/null | cut -d. -f1)"
-        if [[ "${fdk_major:-0}" -ge 2 ]] && ! version_ge "$version" "4.2"; then
-            log_warn "fdk-aac v${fdk_major} API requires FFmpeg >= 4.2, skipping for ${version}"
-        else
-            CONFIGURE_FLAGS+=("--enable-libfdk-aac")
-        fi
-    fi
-
-    # === Features gated by minimum FFmpeg version ===
-    # (configure option does not exist in older versions)
-
-    # dav1d — FFmpeg 8.1 requires >= 1.0.0
-    if version_ge "$version" "4.1"; then
-        if version_ge "$version" "8.1"; then
-            pkg_enable dav1d "--enable-libdav1d" "1.0.0"
-        else
-            pkg_enable dav1d "--enable-libdav1d"
-        fi
-    fi
-
-    version_ge "$version" "4.3" && pkg_enable rav1e      "--enable-librav1e"
-    version_ge "$version" "4.4" && pkg_enable SvtAv1Enc  "--enable-libsvtav1"
-    version_ge "$version" "6.0" && pkg_enable harfbuzz   "--enable-libharfbuzz"
-
-    # Vulkan + libplacebo — interdependent on FFmpeg >= 5.0.
-    # FFmpeg 5.0+ vulkan filters require libplacebo; enabling vulkan without it
-    # causes configure to fail. Minimum libplacebo version varies by FFmpeg:
-    #   FFmpeg 5.0-7.x: >= 4.192.0
-    #   FFmpeg 8.0:     >= 5.229.0
-    #   FFmpeg 8.1:     >= 7.349.0
-    if version_ge "$version" "4.3"; then
-        local has_vulkan=false has_placebo=false
-        pkg-config --exists vulkan 2>/dev/null && has_vulkan=true
-
-        local placebo_min=""
-        if version_ge "$version" "8.1"; then
-            placebo_min="7.349.0"
-        elif version_ge "$version" "8.0"; then
-            placebo_min="5.229.0"
-        elif version_ge "$version" "5.0"; then
-            placebo_min="4.192.0"
-        fi
-
-        if [[ -n "$placebo_min" ]]; then
-            pkg-config --atleast-version="$placebo_min" libplacebo 2>/dev/null && has_placebo=true
-        fi
-
-        if [[ "$has_vulkan" == true ]]; then
-            # FFmpeg >= 5.0: vulkan requires libplacebo
-            if [[ -n "$placebo_min" ]] && [[ "$has_placebo" != true ]]; then
-                log_warn "Vulkan disabled for ${version}: requires libplacebo >= ${placebo_min}"
-            else
-                CONFIGURE_FLAGS+=("--enable-vulkan")
-            fi
-        fi
-
-        [[ "$has_placebo" == true ]] && CONFIGURE_FLAGS+=("--enable-libplacebo")
-    fi
-
-    # === GPU (NVENC / CUVID / NVDEC) ===
-    if [[ "${BUILD_GPU:-false}" == true ]]; then
-        CONFIGURE_FLAGS+=("--enable-nvenc" "--enable-ffnvcodec" "--enable-cuvid")
-        version_ge "$version" "4.1" && CONFIGURE_FLAGS+=("--enable-nvdec")
-    fi
-
-    # === postproc — removed in FFmpeg 8.0 ===
-    ! version_ge "$version" "8.0" && CONFIGURE_FLAGS+=("--enable-postproc")
+b_expat() {
+    fetch "expat-${V_EXPAT}.tar.xz" \
+        "https://github.com/libexpat/libexpat/releases/download/R_${V_EXPAT//./_}/expat-${V_EXPAT}.tar.xz"
+    cd "$SRC"; autotools --without-docbook --without-examples --without-tests
 }
 
-# ── Build a single FFmpeg version ────────────────────────────────────────────
-build_version() {
-    local version="$1"
-    local tag="${FFMPEG_TAGS[$version]}"
-    local src_dir="${BUILD_DIR}/ffmpeg-${version}"
-    local prefix="${PREFIX_BASE}/${version}"
+b_freetype() {  # first pass: no harfbuzz (breaks the freetype<->harfbuzz cycle)
+    fetch "freetype-${V_FREETYPE}.tar.xz" \
+        "https://download.savannah.gnu.org/releases/freetype/freetype-${V_FREETYPE}.tar.xz" \
+        "https://downloads.sourceforge.net/freetype/freetype-${V_FREETYPE}.tar.xz"
+    cd "$SRC"; autotools --with-harfbuzz=no --with-brotli=no --with-png=no
+}
 
-    log_step "════════════════════════════════════════════════════════"
-    log_step "Building FFmpeg ${version} (tag: ${tag})"
-    log_step "════════════════════════════════════════════════════════"
+b_fribidi() {
+    fetch "fribidi-${V_FRIBIDI}.tar.xz" \
+        "https://github.com/fribidi/fribidi/releases/download/v${V_FRIBIDI}/fribidi-${V_FRIBIDI}.tar.xz"
+    cd "$SRC"; autotools --disable-debug
+}
 
-    local nvcodec_ok=false
-    if [[ "$HAS_CUDA" == true || "$FORCE_GPU" == true ]]; then
-        if install_nvcodec_headers "${NVCODEC_BRANCH[$version]}"; then
-            nvcodec_ok=true
-        else
-            log_warn "nv-codec-headers unavailable — GPU support disabled for ${version}"
-        fi
-    fi
+b_harfbuzz() {
+    fetch "harfbuzz-${V_HARFBUZZ}.tar.xz" \
+        "https://github.com/harfbuzz/harfbuzz/releases/download/${V_HARFBUZZ}/harfbuzz-${V_HARFBUZZ}.tar.xz"
+    cd "$SRC"
+    meson_static -Dfreetype=enabled -Dglib=disabled -Dgobject=disabled \
+        -Dcairo=disabled -Dicu=disabled -Dtests=disabled -Ddocs=disabled -Dutilities=disabled
+}
 
-    if [[ ! -d "$src_dir" ]]; then
-        log_step "Cloning FFmpeg ${version}..."
-        git clone --depth 1 --branch "$tag" https://git.ffmpeg.org/ffmpeg.git "$src_dir"
-    fi
+b_fontconfig() {
+    fetch "fontconfig-${V_FONTCONFIG}.tar.xz" \
+        "https://www.freedesktop.org/software/fontconfig/release/fontconfig-${V_FONTCONFIG}.tar.xz"
+    cd "$SRC"; autotools --disable-docs --sysconfdir=/etc --localstatedir=/var
+}
 
-    mkdir -p "$prefix"
-    pushd "$src_dir" > /dev/null
+b_libass() {
+    fetch "libass-${V_LIBASS}.tar.xz" \
+        "https://github.com/libass/libass/releases/download/${V_LIBASS}/libass-${V_LIBASS}.tar.xz"
+    cd "$SRC"; autotools
+}
+
+b_x264() {
+    git_fetch "x264" "stable" \
+        "https://code.videolan.org/videolan/x264.git" \
+        "https://github.com/mirror/x264.git"
+    cd "$SRC"
+    ./configure --prefix="$DEPS_PREFIX" --enable-static --enable-pic --disable-cli --disable-opencl
+    make $JOBS; make install
+}
+
+b_x265() {
+    fetch "x265_${V_X265}.tar.gz" \
+        "https://ftp.videolan.org/pub/videolan/x265/x265_${V_X265}.tar.gz" \
+        "https://bitbucket.org/multicoreware/x265_git/downloads/x265_${V_X265}.tar.gz"
+    cd "$SRC"
+    cmake_static "$SRC/source" -DENABLE_SHARED=OFF -DENABLE_CLI=OFF
+}
+
+b_vpx() {
+    fetch "libvpx-${V_VPX}.tar.gz" \
+        "https://github.com/webmproject/libvpx/archive/refs/tags/v${V_VPX}.tar.gz"
+    cd "$SRC"
+    ./configure --prefix="$DEPS_PREFIX" --enable-static --disable-shared --enable-pic \
+        --enable-vp9-highbitdepth --disable-examples --disable-tools --disable-docs --disable-unit-tests
+    make $JOBS; make install
+}
+
+b_aom() {
+    git_fetch "aom" "v${V_AOM}" \
+        "https://aomedia.googlesource.com/aom"
+    cd "$SRC"
+    cmake_static "$SRC" -DENABLE_DOCS=0 -DENABLE_EXAMPLES=0 -DENABLE_TESTS=0 -DENABLE_TOOLS=0 \
+        -DCONFIG_AV1_ENCODER=1 -DCONFIG_AV1_DECODER=1
+}
+
+b_dav1d() {
+    fetch "dav1d-${V_DAV1D}.tar.gz" \
+        "https://code.videolan.org/videolan/dav1d/-/archive/${V_DAV1D}/dav1d-${V_DAV1D}.tar.gz"
+    cd "$SRC"; meson_static -Denable_tools=false -Denable_tests=false
+}
+
+b_opus() {
+    fetch "opus-${V_OPUS}.tar.gz" \
+        "https://github.com/xiph/opus/releases/download/v${V_OPUS}/opus-${V_OPUS}.tar.gz" \
+        "https://downloads.xiph.org/releases/opus/opus-${V_OPUS}.tar.gz"
+    cd "$SRC"; autotools --disable-doc --disable-extra-programs
+}
+
+b_lame() {
+    fetch "lame-${V_LAME}.tar.gz" \
+        "https://downloads.sourceforge.net/lame/lame-${V_LAME}.tar.gz"
+    cd "$SRC"; autotools --enable-nasm --disable-frontend
+}
+
+b_fdkaac() {
+    fetch "fdk-aac-${V_FDKAAC}.tar.gz" \
+        "https://github.com/mstorsjo/fdk-aac/archive/refs/tags/v${V_FDKAAC}.tar.gz"
+    cd "$SRC"; ./autogen.sh; autotools
+}
+
+b_ogg() {
+    fetch "libogg-${V_OGG}.tar.gz" \
+        "https://downloads.xiph.org/releases/ogg/libogg-${V_OGG}.tar.gz" \
+        "https://github.com/xiph/ogg/releases/download/v${V_OGG}/libogg-${V_OGG}.tar.gz"
+    cd "$SRC"; autotools
+}
+
+b_vorbis() {
+    fetch "libvorbis-${V_VORBIS}.tar.gz" \
+        "https://downloads.xiph.org/releases/vorbis/libvorbis-${V_VORBIS}.tar.gz"
+    cd "$SRC"; autotools --disable-docs --disable-examples --with-ogg="$DEPS_PREFIX"
+}
+
+b_theora() {
+    fetch "libtheora-${V_THEORA}.tar.gz" \
+        "https://downloads.xiph.org/releases/theora/libtheora-${V_THEORA}.tar.gz"
+    cd "$SRC"
+    autotools --disable-examples --disable-asm --disable-oggtest --disable-vorbistest \
+        --disable-spec --with-ogg="$DEPS_PREFIX" --with-vorbis="$DEPS_PREFIX"
+}
+
+build_dependencies() {
+    build zlib       b_zlib
+    build bzip2      b_bzip2
+    build openssl    b_openssl
+    build expat      b_expat
+    build freetype   b_freetype
+    build fribidi    b_fribidi
+    build harfbuzz   b_harfbuzz
+    build fontconfig b_fontconfig
+    build libass     b_libass
+    build x264       b_x264
+    build x265       b_x265
+    build vpx        b_vpx
+    build aom        b_aom
+    build dav1d      b_dav1d
+    build opus       b_opus
+    build lame       b_lame
+    build fdkaac     b_fdkaac
+    build ogg        b_ogg
+    build vorbis     b_vorbis
+    build theora     b_theora
+}
+
+# ── FFmpeg ─────────────────────────────────────────────────────────────────────
+build_ffmpeg() {
+    step "Building FFmpeg ${V_FFMPEG}"
+    fetch "ffmpeg-${V_FFMPEG}.tar.xz" \
+        "https://ffmpeg.org/releases/ffmpeg-${V_FFMPEG}.tar.xz"
+    cd "$SRC"
     make distclean 2>/dev/null || true
 
-    BUILD_GPU="$nvcodec_ok"
-    get_configure_flags "$version" "$prefix"
-    local build_log="${src_dir}/xcvm_build.log"
-    local rc=0
-
-    # Configure
-    if [[ "$VERBOSE" == true ]]; then
-        ./configure "${CONFIGURE_FLAGS[@]}" 2>&1 | tee "$build_log"
-        rc=${PIPESTATUS[0]}
-    else
-        ./configure "${CONFIGURE_FLAGS[@]}" > "$build_log" 2>&1 && rc=0 || rc=$?
-        tail -20 "$build_log"
-    fi
-    if [[ $rc -ne 0 ]]; then
-        log_error "Configure failed. Check: ${src_dir}/ffbuild/config.log"
-        popd > /dev/null
-        return 1
-    fi
-
-    # Compile
-    log_step "Compiling with ${NPROC} threads..."
-    if [[ "$VERBOSE" == true ]]; then
-        make -j"${NPROC}" 2>&1 | tee -a "$build_log"
-        rc=${PIPESTATUS[0]}
-    else
-        make -j"${NPROC}" >> "$build_log" 2>&1 && rc=0 || rc=$?
-        tail -5 "$build_log"
-    fi
-    if [[ $rc -ne 0 ]]; then
-        log_error "Compilation failed. Log: ${build_log}"
-        popd > /dev/null
-        return 1
-    fi
-
-    # Install to prefix
-    log_step "Installing to prefix..."
-    if [[ "$VERBOSE" == true ]]; then
-        make install 2>&1 | tee -a "$build_log"
-        rc=${PIPESTATUS[0]}
-    else
-        make install >> "$build_log" 2>&1 && rc=0 || rc=$?
-    fi
-    if [[ $rc -ne 0 ]]; then
-        log_error "make install failed. Log: ${build_log}"
-        popd > /dev/null
-        return 1
-    fi
-
-    popd > /dev/null
-
-    local ffmpeg_bin="${prefix}/bin/ffmpeg"
-    if [[ ! -x "$ffmpeg_bin" ]] || ! timeout 5 "$ffmpeg_bin" -version &>/dev/null; then
-        log_error "Binary not working"
-        return 1
-    fi
-
-    log_info "✅ FFmpeg ${version} built successfully"
-    log_info "Enabled features:"
-    echo "   DASH          : $( "$ffmpeg_bin" -formats 2>/dev/null | grep -q 'E dash' && echo "✅" || echo "❌" )"
-    echo "   DRM/VAAPI     : $( "$ffmpeg_bin" -hwaccels 2>/dev/null | grep -qE 'vaapi|drm' && echo "✅" || echo "❌" )"
-    echo "   AV1 (dav1d)   : $( "$ffmpeg_bin" -decoders 2>/dev/null | grep -q dav1d && echo "✅" || echo "❌" )"
-    echo "   AV1 (aom)     : $( "$ffmpeg_bin" -encoders 2>/dev/null | grep -q libaom && echo "✅" || echo "❌" )"
-    echo "   AV1 (svtav1)  : $( "$ffmpeg_bin" -encoders 2>/dev/null | grep -q libsvtav1 && echo "✅" || echo "❌" )"
-    echo "   libzimg/vmaf  : $( "$ffmpeg_bin" -filters 2>/dev/null | grep -q zscale && echo "✅" || echo "❌" )"
-    echo "   Vulkan/placebo: $( "$ffmpeg_bin" -hwaccels 2>/dev/null | grep -q vulkan && echo "✅" || echo "N/A" )"
-
-    return 0
+    # NB: we deliberately do NOT pass -static (would static-link glibc → segfaults
+    # in getaddrinfo/NSS). Only our prefix has .a files, so all codecs link static
+    # automatically; libstdc++/libgcc are folded in via the -static-* flags. glibc
+    # stays dynamic. The result is verified afterwards by verify_static().
+    ./configure \
+        --prefix="$FF_PREFIX" \
+        --pkg-config-flags=--static \
+        --extra-cflags="-I$DEPS_PREFIX/include" \
+        --extra-ldflags="-L$DEPS_PREFIX/lib -L$DEPS_PREFIX/lib64 -static-libgcc -static-libstdc++" \
+        --extra-libs="-lpthread -lm -ldl -lstdc++" \
+        --extra-version="XCVM" \
+        --enable-static --disable-shared --enable-pic \
+        --disable-debug --disable-doc --disable-ffplay \
+        --enable-gpl --enable-version3 --enable-nonfree \
+        --enable-runtime-cpudetect \
+        --enable-openssl \
+        --enable-zlib --enable-bzlib \
+        --enable-libx264 --enable-libx265 --enable-libvpx --enable-libaom --enable-libdav1d \
+        --enable-libopus --enable-libmp3lame --enable-libfdk-aac \
+        --enable-libvorbis --enable-libtheora \
+        --enable-libass --enable-libfreetype --enable-libfribidi --enable-libharfbuzz --enable-fontconfig
+    make $JOBS
+    make install
 }
 
-# ── Install into XC_VM ───────────────────────────────────────────────────────
-install_version() {
-    local version="$1"
-    local prefix="${PREFIX_BASE}/${version}"
-    local target="${INSTALL_DIR}/${version}"
-    if [[ ! -x "${prefix}/bin/ffmpeg" ]]; then
-        log_error "No build for ${version}"
-        return 1
-    fi
-    log_step "Installing FFmpeg ${version} to ${target}..."
-    if [[ -d "$target" ]]; then
-        local backup="${target}.backup.$(date +%Y%m%d_%H%M%S)"
-        log_info "Backing up existing installation → ${backup}"
-        cp -a "$target" "$backup"
-    fi
-    mkdir -p "$target"
-    cp -f "${prefix}/bin/ffmpeg" "$target/ffmpeg"
-    cp -f "${prefix}/bin/ffprobe" "$target/ffprobe"
+# ── Verification: fail the build if any non-glibc lib is dynamically needed ─────
+# This is the guard that makes "libraries are baked in" a checked invariant
+# rather than a hope. Allowed NEEDED entries are the glibc family + libgcc_s,
+# which exist on every Linux host.
+verify_static() {
+    local bin="$1"
+    local allow='^(libc|libm|libdl|libpthread|librt|libresolv|libgcc_s|ld-linux.*|linux-vdso.*)\.so'
+    step "Verifying $bin has no external library dependencies"
+    "$bin" -version >/dev/null 2>&1 || die "$bin does not run"
 
-    # Write build metadata
-    cat > "${target}/BUILD_INFO" <<EOF
-Built by: XC_VM FFmpeg Auto-Builder
-Version:  FFmpeg ${version} (${FFMPEG_TAGS[$version]})
-Date:     $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-OS:       $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME}" || uname -sr)
-Arch:     $(uname -m)
-GCC:      $(gcc --version 2>/dev/null | head -1 || echo 'unknown')
-GPU:      $(if [[ "$HAS_CUDA" == true ]]; then echo "NVENC+CUVID (CUDA: ${CUDA_HOME})"; else echo 'none (CPU-only)'; fi)
-Strategy: static deps + dynamic glibc
+    local needed bad=()
+    needed="$(readelf -d "$bin" 2>/dev/null | awk -F'[][]' '/NEEDED/{print $2}')"
+    echo "$needed" | sed 's/^/    NEEDED /'
+    local lib
+    while read -r lib; do
+        [[ -z "$lib" ]] && continue
+        if ! [[ "$lib" =~ $allow ]]; then
+            bad+=("$lib")
+        fi
+    done <<< "$needed"
+
+    if [[ ${#bad[@]} -gt 0 ]]; then
+        die "NOT self-contained — external dynamic deps remain: ${bad[*]}"
+    fi
+    msg "✓ self-contained (only glibc/libgcc dynamic deps)"
+}
+
+# ── Package ────────────────────────────────────────────────────────────────────
+package() {
+    step "Packaging into $OUT_DIR"
+    local ff="$FF_PREFIX/bin/ffmpeg" fp="$FF_PREFIX/bin/ffprobe"
+    [[ -x "$ff" ]] || die "ffmpeg not built"
+    [[ -x "$fp" ]] || die "ffprobe not built"
+
+    install -m 0755 "$ff" "$OUT_DIR/ffmpeg"
+    install -m 0755 "$fp" "$OUT_DIR/ffprobe"
+    strip --strip-unneeded "$OUT_DIR/ffmpeg" "$OUT_DIR/ffprobe" 2>/dev/null || true
+
+    verify_static "$OUT_DIR/ffmpeg"
+    verify_static "$OUT_DIR/ffprobe"
+
+    cat > "$OUT_DIR/BUILD_INFO" <<EOF
+Built by : XC_VM FFmpeg static builder
+FFmpeg   : ${V_FFMPEG}
+Date     : $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+OS       : $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || uname -sr)
+glibc    : $(ldd --version 2>/dev/null | head -1 | awk '{print $NF}')
+Arch     : $(uname -m)
+Strategy : all codecs static, glibc dynamic (verified self-contained)
 EOF
 
-    chown -R xc_vm:xc_vm "$target" 2>/dev/null || true
-    chmod +x "${target}/ffmpeg" "${target}/ffprobe"
-    if timeout 5 "${target}/ffmpeg" -version &>/dev/null; then
-        log_info "Installed and validated: OK"
-    else
-        log_error "Installed binary failed validation"
-        return 1
-    fi
+    # Per-version archive: out/ffmpeg/ffmpeg_<label>.tar.gz (the dir groups all
+    # versions; the filename is already the release-asset name, so upload needs no
+    # rename and md5sum yields the exact name the panel's getAssetHash looks up).
+    mkdir -p "$OUT_DIR/ffmpeg"
+    ( cd "$OUT_DIR" && tar czf "ffmpeg/ffmpeg_${FF_LABEL}.tar.gz" ffmpeg ffprobe BUILD_INFO )
+    msg "Archive: $OUT_DIR/ffmpeg/ffmpeg_${FF_LABEL}.tar.gz ($(du -h "$OUT_DIR/ffmpeg" | cut -f1) ffmpeg binary)"
 }
 
-# ── Summary ──────────────────────────────────────────────────────────────────
-print_summary() {
-    echo ""
-    log_step "════════════════════════════════════════════════════════"
-    log_step "BUILD SUMMARY"
-    log_step "════════════════════════════════════════════════════════"
-    for version in "${VERSIONS_TO_BUILD[@]}"; do
-        if [[ "${BUILD_RESULTS[$version]:-FAILED}" == "OK" ]]; then
-            echo -e " ${GREEN}✓${NC} ${version} → OK"
+# ── Summary of enabled features ────────────────────────────────────────────────
+show_features() {
+    local ff="$OUT_DIR/ffmpeg"
+    step "Enabled features"
+    local f
+    for f in libx264 libx265 libvpx libaom libdav1d libopus libmp3lame libfdk-aac \
+             libvorbis libtheora libass libfreetype libfontconfig libharfbuzz; do
+        if "$ff" -version 2>/dev/null | grep -q -- "--enable-$f"; then
+            echo -e "   ${GREEN}✓${NC} $f"
         else
-            echo -e " ${RED}✗${NC} ${version} → FAILED"
+            echo -e "   ${RED}✗${NC} $f"
         fi
     done
-    if [[ "$DO_INSTALL" == true ]]; then
-        log_info "Installed to: ${INSTALL_DIR}"
-    fi
-    log_info "Build artifacts: ${PREFIX_BASE}/"
-    log_info "Source cache: ${BUILD_DIR}/"
+    echo -e "   HLS demux/mux : $("$ff" -formats 2>/dev/null | grep -q ' hls' && echo "✓" || echo "✗")"
+    echo -e "   DASH demux/mux: $("$ff" -formats 2>/dev/null | grep -q ' dash' && echo "✓" || echo "✗")"
+    echo -e "   TLS (https)   : $("$ff" -protocols 2>/dev/null | grep -q 'https' && echo "✓" || echo "✗")"
 }
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────────────────
 main() {
-    if [[ "$(id -u)" -ne 0 ]]; then
-        log_error "Must run as root"
-        exit 1
-    fi
+    [[ "$(id -u)" -eq 0 ]] || die "must run as root"
+    step "XC_VM FFmpeg static builder — FFmpeg ${V_FFMPEG}, all codecs baked in"
+    command -v apt-get >/dev/null 2>&1 || die "this builder targets Debian (apt-get not found)"
 
-    echo ""
-    log_step "XC_VM FFmpeg Auto-Builder - FINAL FULL COMPLETE"
-    log_step "Versions: ${VERSIONS_TO_BUILD[*]}"
-    [[ "$FORCE_GPU" == true ]] && log_step "FORCE_GPU enabled for Docker"
-    echo ""
+    install_build_tools
+    build_dependencies
+    build_ffmpeg
+    package
+    show_features
 
-    mkdir -p "$BUILD_DIR" "$PREFIX_BASE"
-
-    if command -v apt-get &>/dev/null; then
-        install_deps_apt
-    elif command -v dnf &>/dev/null || command -v yum &>/dev/null; then
-        install_deps_dnf
-    else
-        log_error "Unsupported package manager"
-        exit 1
-    fi
-
-    detect_cuda
-
-    local failed=()
-    declare -gA BUILD_RESULTS
-    for version in "${VERSIONS_TO_BUILD[@]}"; do
-        if build_version "$version"; then
-            BUILD_RESULTS[$version]="OK"
-            if [[ "$DO_INSTALL" == true ]]; then
-                install_version "$version" || failed+=("${version}(install)")
-            fi
-        else
-            BUILD_RESULTS[$version]="FAILED"
-            failed+=("$version")
-        fi
-    done
-
-    print_summary
-
-    if [[ ${#failed[@]} -gt 0 ]]; then
-        log_error "Failed versions: ${failed[*]}"
-        exit 1
-    fi
-
-    log_info "✅ ALL DONE! GPU support is fully retained even without GPU during build."
+    msg "✅ DONE — portable FFmpeg in $OUT_DIR"
 }
 
-main "$@"
+case "${1:-}" in
+    -h|--help)
+        echo "Usage: OUT_DIR=/path $0"
+        echo "Builds a fully static (glibc-dynamic only) FFmpeg ${V_FFMPEG} with all codecs baked in."
+        echo "Run as root, ideally inside the Debian 11 container (./build_all.sh ffmpeg)."
+        exit 0 ;;
+    *) main ;;
+esac

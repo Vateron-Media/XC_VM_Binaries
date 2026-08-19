@@ -1,0 +1,118 @@
+name: Sync xcvm_core extension
+
+# Pulls freshly-built xcvm_core.so group archives from the PRIVATE extension repo's
+# GitHub Release and commits them into this public repo under bin/xcvm_core/<version>/.
+#
+# Split of responsibilities (the build itself lives in the private repo):
+#   private repo (XC_VM_CoreExtention) CI:  compiles the .so matrix (reusing this repo's
+#     build/ext.sh core), load-tests each OpenSSL-ABI group, and publishes a Release with
+#     assets xcvm_core-openssl1.1.tar.gz and xcvm_core-openssl3.tar.gz.
+#   this workflow:  downloads those assets with a token that has READ access to the
+#     private repo (secret XCVM_CORE_PAT), lays them out under bin/xcvm_core/<version>/,
+#     regenerates SHA256SUMS, stamps versions.json, and commits. The private token never
+#     leaves CI — customer servers only ever see this PUBLIC repo/its releases.
+#
+# Trigger it from the private repo's release job with:
+#   curl -X POST -H "Authorization: Bearer <token-with-dispatch>" \
+#     https://api.github.com/repos/Vateron-Media/XC_VM_Binaries/dispatches \
+#     -d '{"event_type":"xcvm_core_released","client_payload":{"tag":"1.0.1"}}'
+
+on:
+  repository_dispatch:
+    types: [xcvm_core_released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag in the extension repo (blank = latest)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  # Private repo that publishes the xcvm_core release assets. Override here if it moves.
+  EXT_REPO: Vateron-Media/XC_VM_CoreExtention
+  # Group archives expected as release assets.
+  GROUPS: "openssl1.1 openssl3"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          TAG="${{ github.event.client_payload.tag || github.event.inputs.tag }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download extension release assets
+        env:
+          GH_TOKEN: ${{ secrets.XCVM_CORE_PAT }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "::error::secret XCVM_CORE_PAT is not set (needs read access to $EXT_REPO)"; exit 1; }
+          mkdir -p _dl
+          TAG='${{ steps.tag.outputs.tag }}'
+          if [ -z "$TAG" ]; then
+            TAG="$(gh release view --repo "$EXT_REPO" --json tagName -q .tagName)"
+            echo "Resolved latest tag: $TAG"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          for g in $GROUPS; do
+            gh release download "$TAG" --repo "$EXT_REPO" \
+              --pattern "xcvm_core-$g.tar.gz" --dir _dl --clobber
+          done
+          ls -l _dl
+
+      - name: Stage into bin/xcvm_core/<version>/
+        id: stage
+        run: |
+          set -euo pipefail
+          # Version = release tag without a leading v. Prefer the VERSION baked into the
+          # first archive if present (authoritative), else fall back to the tag.
+          VER="${TAG#v}"
+          tar -xzf "_dl/xcvm_core-openssl3.tar.gz" -C _dl VERSION 2>/dev/null || \
+          tar -xzf "_dl/xcvm_core-openssl1.1.tar.gz" -C _dl VERSION 2>/dev/null || true
+          [ -f _dl/VERSION ] && VER="$(tr -d '[:space:]' < _dl/VERSION)"
+          [ -n "$VER" ] || { echo "::error::could not determine version"; exit 1; }
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+          DEST="bin/xcvm_core/$VER"
+          mkdir -p "$DEST"
+          for g in $GROUPS; do
+            cp "_dl/xcvm_core-$g.tar.gz" "$DEST/"
+          done
+          ( cd "$DEST" && sha256sum xcvm_core-*.tar.gz > SHA256SUMS )
+          echo "Staged:"; ls -l "$DEST"
+
+      - name: Stamp versions.json
+        run: |
+          set -euo pipefail
+          VER='${{ steps.stage.outputs.ver }}'
+          # Update ONLY the "version" line inside the "xcvm_core" block, leaving the rest
+          # of versions.json (formatting, mirror lists) byte-for-byte untouched.
+          awk -v ver="$VER" '
+            /"xcvm_core"[[:space:]]*:/ { inblk=1 }
+            inblk && /"version"[[:space:]]*:/ {
+              sub(/"version"[[:space:]]*:[[:space:]]*"[^"]*"/, "\"version\": \"" ver "\"")
+              inblk=0
+            }
+            { print }
+          ' versions.json > versions.json.tmp && mv versions.json.tmp versions.json
+          grep -A3 '"xcvm_core"' versions.json
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bin/xcvm_core versions.json
+          if git diff --cached --quiet; then
+            echo "No changes — already in sync."
+            exit 0
+          fi
+          git commit -m "chore(xcvm_core): sync extension ${{ steps.stage.outputs.ver }} from $EXT_REPO [auto]"
+          git push
