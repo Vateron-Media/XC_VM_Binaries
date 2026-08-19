@@ -952,6 +952,26 @@ build_php_extension() {
         warn "xcvm_core.so installed but failed to load — check dependencies"
     fi
 
+    # Register xcvm_core in php.ini (must come AFTER the ionCube zend_extension,
+    # which install_ioncube_loader already appended) and stamp the SaaS endpoint.
+    # The endpoint is an ENCRYPTED blob produced by tools/xcvm_url_vault.py
+    # (AES-256-GCM, key baked into xcvm_core.so): a plaintext URL here is ignored
+    # and the extension falls back to its built-in default, so a value cannot be
+    # swapped for a rogue server without the build secret. Point a build at a
+    # different endpoint via the XCVM_SERVER_URL_ENC env var (regenerate with
+    # `xcvm_url_vault.py encrypt <url>`).
+    local php_ini="$XC_VM_DIR/bin/php/lib/php.ini"
+    if ! grep -q '^extension=xcvm_core.so' "$php_ini" 2>/dev/null; then
+        echo "extension=xcvm_core.so" >> "$php_ini"
+        log "✓ xcvm_core.so registered in php.ini"
+    fi
+    # Default = encrypted "https://www.xcvm.tech" (same as the .so's baked-in URL).
+    local url_enc="${XCVM_SERVER_URL_ENC:-4838dU01gwDZCPyGpmaYP2PIqWmrM3IgzCMQu3IGYOIuKHMDqLDLcHdpKyxi3SCYa3KTi40=}"
+    if ! grep -q '^xcvm_core.server_url' "$php_ini" 2>/dev/null; then
+        echo "xcvm_core.server_url=\"$url_enc\"" >> "$php_ini"
+        log "✓ xcvm_core.server_url stamped in php.ini"
+    fi
+
     rm -rf "$ext_build"
 }
 
