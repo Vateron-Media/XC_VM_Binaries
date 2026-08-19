@@ -179,6 +179,33 @@ build_ubuntu() {
     build ubuntu24 ubuntu:24.04 ubuntu_24 "$DOCKER_DIR/debian/Dockerfile"
 }
 
+# Static FFmpeg builder — separate Dockerfile (Debian 11, oldest glibc), opt-in only.
+# Not part of the default `all` run because a from-source static build is slow.
+# Produces out/ffmpeg.tar.gz (+ standalone ffmpeg/ffprobe binaries).
+build_ffmpeg() {
+    local logfile="$LOG_DIR/ffmpeg.log"
+
+    echo ">>> IMAGE: ffmpeg (log: $logfile)"
+
+    docker build \
+        -t xcvm-builder:ffmpeg \
+        -f "$DOCKER_DIR/ffmpeg/Dockerfile" \
+        "$ROOT_DIR" 2>&1 | tee "$logfile"
+
+    echo ">>> BUILD: ffmpeg (static, all codecs baked in)"
+
+    # Pass the version/label through so a single builder image can produce each
+    # panel version: V_FFMPEG=7.1 FF_LABEL=7.1 ./build_all.sh ffmpeg
+    # (empty values fall back to the script defaults via ${VAR:-...}).
+    docker run --rm \
+        -v "$OUT_DIR:/out" \
+        -e "V_FFMPEG=${V_FFMPEG:-}" \
+        -e "FF_LABEL=${FF_LABEL:-}" \
+        xcvm-builder:ffmpeg 2>&1 | tee -a "$logfile"
+
+    echo ">>> Log saved: $logfile"
+}
+
 build_rocky() {
     local logfile="$LOG_DIR/rocky_9.log"
 
@@ -255,6 +282,9 @@ case "$1" in
     rocky|rocky9)
         build_rocky
         ;;
+    ffmpeg)
+        build_ffmpeg
+        ;;
     -h|--help)
         echo "Usage:"
         echo "  ./build.sh            Build all targets"
@@ -268,6 +298,7 @@ case "$1" in
         echo "  ./build.sh ubuntu22   Build Ubuntu 22.04 (TARGET=ubuntu_22)"
         echo "  ./build.sh ubuntu24   Build Ubuntu 24.04 (TARGET=ubuntu_24)"
         echo "  ./build.sh rocky      Build Rocky 9 (TARGET=rocky_9)"
+        echo "  ./build.sh ffmpeg     Build static FFmpeg 8.1 (out/ffmpeg.tar.gz; not in 'all')"
         exit 0
         ;;
     *)
@@ -280,9 +311,15 @@ esac
 # ----------------------
 # Generate checksums
 # ----------------------
-if ls "$OUT_DIR"/*.tar.gz 1>/dev/null 2>&1; then
+if ls "$OUT_DIR"/*.tar.gz 1>/dev/null 2>&1 || ls "$OUT_DIR"/ffmpeg/*.tar.gz 1>/dev/null 2>&1; then
     echo ">>> Generating hashes.md5..."
-    (cd "$OUT_DIR" && md5sum *.tar.gz > hashes.md5)
+    # Flatten the ffmpeg/ subdir so each entry is the bare asset name the panel's
+    # GitHubReleases::getAssetHash() looks up (ffmpeg_8.0.tar.gz, not ffmpeg/…).
+    (
+        cd "$OUT_DIR"
+        ls *.tar.gz >/dev/null 2>&1 && md5sum *.tar.gz
+        [ -d ffmpeg ] && md5sum ffmpeg/*.tar.gz 2>/dev/null | sed 's|  ffmpeg/|  |'
+    ) > "$OUT_DIR/hashes.md5"
     echo ">>> Checksums saved: $OUT_DIR/hashes.md5"
 fi
 
