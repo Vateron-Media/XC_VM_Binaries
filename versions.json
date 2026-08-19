@@ -53,6 +53,10 @@
       "https://github.com/arut/nginx-rtmp-module/archive/refs/tags/v{VERSION}.tar.gz"
     ]
   },
+  "xcvm_core": {
+    "_note": "Private PHP extension built in the XC_VM_CoreExtention repo (not here). This mirrors PHP_XCVM_CORE_VERSION from that repo and is stamped automatically by .github/workflows/sync-xcvm-core.yml when a new release is pulled into bin/xcvm_core/<version>/. Single source of truth for the installed extension version.",
+    "version": "2.1.0"
+  },
   "ioncube": {
     "url": [
       "https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_{ARCH}.tar.gz"
