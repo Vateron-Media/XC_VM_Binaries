@@ -364,6 +364,12 @@ build_ffmpeg() {
         --enable-libopus --enable-libmp3lame --enable-libfdk-aac \
         --enable-libvorbis --enable-libtheora \
         --enable-libass --enable-libfreetype --enable-libfribidi --enable-libharfbuzz --enable-fontconfig
+    # NB: --enable-libfreetype is what enables the `drawtext` FILTER — required by
+    # the xc_fanout "send message" overlay (it re-encodes the viewer's segment with
+    # drawtext). Some ffmpeg builds ship WITHOUT drawtext (older panel-bundled 7.1/8.0
+    # were built without libfreetype); on those the overlay silently no-ops, so the
+    # daemon's `service` launcher hunts for a drawtext-capable ffmpeg. show_features
+    # below asserts the filter is actually present in THIS build — keep it green.
     make $JOBS
     make install
 }
@@ -443,6 +449,14 @@ show_features() {
     echo -e "   HLS demux/mux : $("$ff" -formats 2>/dev/null | grep -q ' hls' && echo "✓" || echo "✗")"
     echo -e "   DASH demux/mux: $("$ff" -formats 2>/dev/null | grep -q ' dash' && echo "✓" || echo "✗")"
     echo -e "   TLS (https)   : $("$ff" -protocols 2>/dev/null | grep -q 'https' && echo "✓" || echo "✗")"
+    # drawtext filter — REQUIRED by the xc_fanout "send message" overlay. Not every
+    # ffmpeg has it (needs libfreetype at build time); assert it here so a build that
+    # would silently break the overlay is caught in the report, not in production.
+    if "$ff" -hide_banner -filters 2>/dev/null | grep -qw drawtext; then
+        echo -e "   drawtext (overlay): ${GREEN}✓${NC}"
+    else
+        echo -e "   drawtext (overlay): ${RED}✗  MISSING — send-message overlay will no-op${NC}"
+    fi
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────────
