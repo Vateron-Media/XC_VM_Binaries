@@ -54,8 +54,12 @@
     ]
   },
   "xcvm_core": {
-    "_note": "Private PHP extension built in the XC_VM_CoreExtention repo (not here). This mirrors PHP_XCVM_CORE_VERSION from that repo and is stamped automatically by .github/workflows/sync-xcvm-core.yml when a new release is pulled into bin/xcvm_core/<version>/. Single source of truth for the installed extension version.",
+    "_note": "LEGACY C build (frozen). The old ionCube/OpenSSL C extension under bin/xcvm_core/, last synced by the C-era pipeline (2.1.1 was the final C release). No longer updated — the extension repo now ships the Rust rewrite under 'xcvm_extention'. Kept so installs pinned to the C build keep resolving.",
     "version": "2.1.1"
+  },
+  "xcvm_extention": {
+    "_note": "Rust rewrite of the PHP extension, built in the XC_VM_CoreExtention repo (not here). Self-contained .so (per-PHP-version groups php8.1/php8.4, no OpenSSL/libsodium linkage). Stamped automatically by .github/workflows/sync-xcvm-core.yml when a new release is pulled into bin/xcvm_extention/. Single source of truth for the installed Rust extension version.",
+    "version": "0.0.0"
   },
   "ioncube": {
     "url": [
