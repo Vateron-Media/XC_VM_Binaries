@@ -59,7 +59,7 @@
   },
   "xcvm_extention": {
     "_note": "Rust rewrite of the PHP extension, built in the XC_VM_CoreExtention repo (not here). Self-contained .so (per-PHP-version groups php8.1/php8.4, no OpenSSL/libsodium linkage). Stamped automatically by .github/workflows/sync-xcvm-core.yml when a new release is pulled into bin/xcvm_extention/. Single source of truth for the installed Rust extension version.",
-    "version": "2.2.1"
+    "version": "2.2.2"
   },
   "ioncube": {
     "url": [
