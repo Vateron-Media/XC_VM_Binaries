@@ -1,17 +1,23 @@
-name: Sync xcvm_core extension
+name: Sync xcvm extension (Rust)
 
 # Pulls freshly-built xcvm_core.so group archives from the PRIVATE extension repo's
-# GitHub Release and commits them into this public repo flat under bin/xcvm_core/.
+# GitHub Release and commits them into this public repo flat under bin/xcvm_extention/.
+#
+# The extension repo now ships the RUST rewrite (self-contained .so, no OpenSSL/libsodium
+# linkage), grouped per PHP ABI version (php8.1, php8.4) instead of the old OpenSSL-ABI
+# split. To avoid disturbing installs pinned to the retired C build, the Rust artifacts
+# land in a SEPARATE tree — bin/xcvm_extention/ — and the legacy C releases under
+# bin/xcvm_core/ are left frozen (this workflow never writes there any more).
 #
 # Split of responsibilities (the build itself lives in the private repo):
-#   private repo (XC_VM_CoreExtention):  builds the .so matrix, load-tests each
-#     OpenSSL-ABI group, and publishes a Release with the assets
-#     xcvm_core-openssl1.1.tar.gz and xcvm_core-openssl3.tar.gz.
+#   private repo (XC_VM_CoreExtention):  builds the Rust .so matrix, load-tests each
+#     PHP-version group, and publishes a Release with the assets
+#     xcvm_core-php8.1.tar.gz and xcvm_core-php8.4.tar.gz.
 #   this workflow:  downloads those assets with a token that has READ access to the
-#     private repo (secret XCVM_CORE_PAT) and overwrites them flat under bin/xcvm_core/
-#     (fixed paths, no per-version dirs) plus version.json + SHA256SUMS, stamps
-#     versions.json, and commits. The private token never leaves CI — customer servers
-#     only ever see this PUBLIC repo/its releases.
+#     private repo (secret XCVM_CORE_PAT) and overwrites them flat under
+#     bin/xcvm_extention/ (fixed paths, no per-version dirs) plus version.json +
+#     SHA256SUMS, stamps the "xcvm_extention" block in versions.json, and commits. The
+#     private token never leaves CI — customer servers only ever see this PUBLIC repo.
 #
 # Trigger it from the private repo's release job with:
 #   curl -X POST -H "Authorization: Bearer <token-with-dispatch>" \
@@ -32,10 +38,10 @@ permissions:
   contents: write
 
 env:
-  # Private repo that publishes the xcvm_core release assets. Override here if it moves.
+  # Private repo that publishes the xcvm extension release assets. Override here if it moves.
   EXT_REPO: Vateron-Media/XC_VM_CoreExtention
-  # Group archives expected as release assets.
-  GROUPS: "openssl1.1 openssl3"
+  # Group archives expected as release assets (per PHP ABI version, Rust build).
+  GROUPS: "php8.1 php8.4"
 
 jobs:
   sync:
@@ -68,7 +74,7 @@ jobs:
           done
           ls -l _dl
 
-      - name: Stage into bin/xcvm_core/
+      - name: Stage into bin/xcvm_extention/
         id: stage
         run: |
           set -euo pipefail
@@ -76,16 +82,18 @@ jobs:
           # repo tags releases as the BARE version (no "v" prefix), so the tag is a valid
           # fallback as-is; the ${TAG#v} strip is just defensive in case that ever changes.
           VER="${TAG#v}"
-          tar -xzf "_dl/xcvm_core-openssl3.tar.gz" -C _dl VERSION 2>/dev/null || \
-          tar -xzf "_dl/xcvm_core-openssl1.1.tar.gz" -C _dl VERSION 2>/dev/null || true
+          for g in $GROUPS; do
+            tar -xzf "_dl/xcvm_core-$g.tar.gz" -C _dl VERSION 2>/dev/null && break || true
+          done
           [ -f _dl/VERSION ] && VER="$(tr -d '[:space:]' < _dl/VERSION)"
           [ -n "$VER" ] || { echo "::error::could not determine version"; exit 1; }
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
 
           # Flat layout: the group archives live at a FIXED path and are overwritten each
           # release (no per-version subdirectories). version.json next to them records the
-          # current version; SHA256SUMS carries the integrity hashes.
-          DEST="bin/xcvm_core"
+          # current version; SHA256SUMS carries the integrity hashes. This is a SEPARATE
+          # tree from the legacy C build (bin/xcvm_core/), which stays frozen.
+          DEST="bin/xcvm_extention"
           mkdir -p "$DEST"
           for g in $GROUPS; do
             cp "_dl/xcvm_core-$g.tar.gz" "$DEST/"
@@ -98,27 +106,28 @@ jobs:
         run: |
           set -euo pipefail
           VER='${{ steps.stage.outputs.ver }}'
-          # Update ONLY the "version" line inside the "xcvm_core" block, leaving the rest
-          # of versions.json (formatting, mirror lists) byte-for-byte untouched.
+          # Update ONLY the "version" line inside the "xcvm_extention" block, leaving the
+          # rest of versions.json (formatting, the legacy "xcvm_core" block, mirror lists)
+          # byte-for-byte untouched.
           awk -v ver="$VER" '
-            /"xcvm_core"[[:space:]]*:/ { inblk=1 }
+            /"xcvm_extention"[[:space:]]*:/ { inblk=1 }
             inblk && /"version"[[:space:]]*:/ {
               sub(/"version"[[:space:]]*:[[:space:]]*"[^"]*"/, "\"version\": \"" ver "\"")
               inblk=0
             }
             { print }
           ' versions.json > versions.json.tmp && mv versions.json.tmp versions.json
-          grep -A3 '"xcvm_core"' versions.json
+          grep -A3 '"xcvm_extention"' versions.json
 
       - name: Commit if changed
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add bin/xcvm_core versions.json
+          git add bin/xcvm_extention versions.json
           if git diff --cached --quiet; then
             echo "No changes — already in sync."
             exit 0
           fi
-          git commit -m "chore(xcvm_core): sync extension ${{ steps.stage.outputs.ver }} from $EXT_REPO [auto]"
+          git commit -m "chore(xcvm_extention): sync Rust extension ${{ steps.stage.outputs.ver }} from $EXT_REPO [auto]"
           git push
