@@ -27,11 +27,6 @@ and delivered separately (see below).
 - A target is **skipped** if its `out/<target>.tar.gz` already exists. Delete the archive to force a rebuild.
 - Per-target build logs land in `logs/<target>.log`.
 - `out/`, `logs/`, and `downloads/` are gitignored (build artifacts / caches).
-- `./build_all.sh ffmpeg` builds a **fully static** FFmpeg 8.1 (every codec compiled from
-  source and baked into the binary; only glibc stays dynamic) via `docker/ffmpeg/Dockerfile`
-  (Debian 11 → oldest glibc, forward-compatible). It is **opt-in** — not part of the default
-  `all` run — and outputs `out/ffmpeg.tar.gz`. The build self-verifies with `readelf -d` and
-  aborts if any non-glibc library is dynamically linked. Logic lives in `build_ffmpeg.sh`.
 
 ## The xcvm_core extension is built elsewhere; this repo only receives it
 
@@ -101,4 +96,4 @@ Key conventions to preserve when editing:
 1. Add a build script under `build/` only if the package base differs (Debian/Ubuntu reuse `build/all.sh`).
 2. Register the `TARGET` case in `docker/entrypoint.sh`.
 3. Add a CLI case + `build` call in `build_all.sh`.
-The Dockerfile usually does not need changes (BASE_IMAGE handles Debian/Ubuntu variants).
+   The Dockerfile usually does not need changes (BASE_IMAGE handles Debian/Ubuntu variants).

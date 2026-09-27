@@ -301,12 +301,6 @@ docker image prune -f
 * All builds are reproducible
 * Every build is automatically tested before packaging
 * The architecture is suitable for CI/CD (GitHub Actions, GitLab CI)
-* **FFmpeg `drawtext`:** the `xc_fanout` "send message" overlay re-encodes a viewer's
-  segment with the `drawtext` filter, which requires FFmpeg to be built **with
-  libfreetype**. Not every FFmpeg has it — some panel-bundled builds (7.1/8.0) shipped
-  without it and the overlay silently no-ops there. `build_ffmpeg.sh` keeps
-  `--enable-libfreetype` on and its `show_features` report asserts `drawtext` is
-  present; if that line is ✗, do not ship the build for overlay use.
 
 ---
 
