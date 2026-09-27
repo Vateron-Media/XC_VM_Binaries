@@ -14,7 +14,7 @@ and delivered separately (see below).
 ## Common commands
 
 ```bash
-./build_all.sh              # build all targets (debian 11/12/13, ubuntu 20/22/24, rocky 9)
+./build_all.sh              # build all targets (debian 12/13, ubuntu 20/22/24, rocky 9)
 ./build_all.sh debian       # group: all Debian targets
 ./build_all.sh ubuntu24     # single target
 ./build_all.sh rocky9       # Rocky Linux 9
@@ -37,9 +37,9 @@ the tiny `.so` changes. **The build lives in the private extension repo**
 (`XC_VM_CoreExtention`, `build_script/build_release.sh`): it pulls the PHP toolchain out of
 this repo's published runtime archives (`bin/php` inside `<target>.tar.gz` — no PHP recompile),
 compiles one `.so` **per OpenSSL-ABI group** on the group's oldest-glibc member
-(`openssl1.1` = debian11/ubuntu20 built on debian11; `openssl3` =
-ubuntu22/debian12/ubuntu24/debian13 built on ubuntu22), load-tests each on every member's
-own PHP, and publishes a GitHub Release.
+(`openssl1.1` = ubuntu20, built on ubuntu20 — debian11 dropped, no longer the group's
+base; `openssl3` = ubuntu22/debian12/ubuntu24/debian13 built on ubuntu22), load-tests
+each on every member's own PHP, and publishes a GitHub Release.
 
 This repo's only role is to **receive** those assets: `.github/workflows/sync-xcvm-core.yml`
 is triggered (repository_dispatch `xcvm_core_released`) by the extension repo's release,
@@ -90,6 +90,9 @@ Key conventions to preserve when editing:
 
 - **PHP extension ordering matters**: in `build/all.sh::main`, ionCube loads first, then OPcache —
   this order is reflected in php.ini and must be kept.
+
+  (Full detail on these conventions is also injected on demand via the live-rules
+  plugin when editing `versions.json`, `build_all.sh`, or `build/*.sh`.)
 
 ## Adding a new distribution
 

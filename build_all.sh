@@ -93,7 +93,7 @@ download_deps() {
     fetch_json nginx                 "nginx-${v_nginx}.tar.gz"                    "$v_nginx"
     fetch_json openssl               "openssl-${v_openssl}.tar.gz"               "$v_openssl"
     fetch_json zlib                  "zlib-${v_zlib}.tar.gz"                     "$v_zlib"
-    # Both PCRE and PCRE2 — old targets (debian11/ubuntu20) use PCRE, others PCRE2.
+    # Both PCRE and PCRE2 — ubuntu20 (oldest remaining target) uses PCRE, others PCRE2.
     fetch_json pcre                  "pcre-${v_pcre}.tar.gz"                     "$v_pcre"
     fetch_json pcre2                 "pcre2-${v_pcre2}.tar.gz"                   "$v_pcre2"
     fetch_json php                   "php-${v_php}.tar.gz"                       "$v_php"
@@ -155,7 +155,6 @@ build() {
 # Build groups
 # ----------------------
 build_debian() {
-    build debian11 debian:11 debian_11 "$DOCKER_DIR/debian/Dockerfile"
     build debian12 debian:12 debian_12 "$DOCKER_DIR/debian/Dockerfile" # debian12 and ubuntu22
     build debian13 debian:13 debian_13 "$DOCKER_DIR/debian/Dockerfile"
 }
@@ -196,7 +195,7 @@ build_rocky() {
 # CLI
 # ----------------------
 case "$1" in
-    ""|all|debian|debian11|debian12|debian13|ubuntu|ubuntu20|ubuntu22|ubuntu24|rocky|rocky9)
+    ""|all|debian|debian12|debian13|ubuntu|ubuntu20|ubuntu22|ubuntu24|rocky|rocky9)
         download_deps
         ;;
 esac
@@ -209,9 +208,6 @@ case "$1" in
         ;;
     debian)
         build_debian
-        ;;
-    debian11)
-        build debian11 debian:11 debian_11 "$DOCKER_DIR/debian/Dockerfile"
         ;;
     debian12)
         build debian12 debian:12 debian_12 "$DOCKER_DIR/debian/Dockerfile"
@@ -238,8 +234,7 @@ case "$1" in
         echo "Usage:"
         echo "  ./build.sh            Build all targets"
         echo "  ./build.sh all        Build all targets"
-        echo "  ./build.sh debian     Build all Debian targets (debian11/12/13)"
-        echo "  ./build.sh debian11   Build Debian 11 (TARGET=debian_11)"
+        echo "  ./build.sh debian     Build all Debian targets (debian12/13)"
         echo "  ./build.sh debian12   Build Debian 12 (TARGET=debian_12)"
         echo "  ./build.sh debian13   Build Debian 13 (TARGET=debian_13)"
         echo "  ./build.sh ubuntu     Build all Ubuntu targets"

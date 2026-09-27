@@ -2,3 +2,4 @@ logs/*
 out/
 downloads/
 graphify-out/*
+.claude/

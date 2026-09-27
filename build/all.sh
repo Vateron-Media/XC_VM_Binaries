@@ -1,5 +1,5 @@
 #!/bin/bash
-# Compilation script for XC_VM on Debian 11/12 and Ubuntu 20.04/22.04/24.04
+# Compilation script for XC_VM on Debian 12/13 and Ubuntu 20.04/22.04/24.04
 # Author: melcocha14@gmail.com
 # Version: 1.8 (Improved with pipx and automatic detection of network.py)
 # Date: 2025-12-10

@@ -8,7 +8,7 @@ fi
 
 SCRIPT=""
 case "$TARGET" in
-    debian_11|debian_12|debian_13|ubuntu_18|ubuntu_20|ubuntu_22|ubuntu_24)
+    debian_12|debian_13|ubuntu_18|ubuntu_20|ubuntu_22|ubuntu_24)
         SCRIPT="/build/all.sh"
         ;;
     rocky_9)

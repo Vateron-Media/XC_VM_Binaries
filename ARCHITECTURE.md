@@ -70,7 +70,7 @@ CLI wrapper for launching builds.
 
 ```bash
 ./build_all.sh              # all targets
-./build_all.sh debian       # Debian 11/12/13
+./build_all.sh debian       # Debian 12/13
 ./build_all.sh ubuntu24     # only Ubuntu 24
 ./build_all.sh rocky        # Rocky Linux 9
 ```
@@ -202,7 +202,6 @@ out/<target>.tar.gz
 
 | TARGET    | OS            |
 | --------- | ------------- |
-| debian_11 | Debian 11     |
 | debian_12 | Debian 12     |
 | debian_13 | Debian 13     |
 | ubuntu_20 | Ubuntu 20.04  |
