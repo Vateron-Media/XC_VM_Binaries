@@ -29,6 +29,7 @@ V_PCRE=""
 V_PCRE2=""
 V_PHP=""
 V_FLV_MODULE=""
+V_LIBSSH2=""
 
 # Print the download URLs for a versions.json key (one per line), substituting
 # {VERSION} and {ARCH}. All links live in versions.json so they can be edited
@@ -71,9 +72,10 @@ load_versions() {
     V_PCRE2=$(_json_ver pcre2 "$vfile")
     V_PHP=$(_json_ver php "$vfile")
     V_FLV_MODULE=$(_json_ver nginx_http_flv_module "$vfile")
+    V_LIBSSH2=$(_json_ver libssh2 "$vfile")
 
     # Validate that all versions were parsed
-    for var in V_NGINX V_OPENSSL V_ZLIB V_PCRE V_PCRE2 V_PHP V_FLV_MODULE; do
+    for var in V_NGINX V_OPENSSL V_ZLIB V_PCRE V_PCRE2 V_PHP V_FLV_MODULE V_LIBSSH2; do
         if [[ -z "${!var}" ]]; then
             error "Failed to parse $var from versions.json"
         fi
@@ -81,7 +83,7 @@ load_versions() {
 
     log "Loaded versions from versions.json:"
     log "  nginx=$V_NGINX openssl=$V_OPENSSL zlib=$V_ZLIB"
-    log "  pcre=$V_PCRE pcre2=$V_PCRE2 php=$V_PHP flv=$V_FLV_MODULE"
+    log "  pcre=$V_PCRE pcre2=$V_PCRE2 php=$V_PHP flv=$V_FLV_MODULE libssh2=$V_LIBSSH2"
 }
 
 # Function for logging
@@ -168,7 +170,7 @@ install_dependencies() {
         unzip wget curl git lsb-release \
         python3 python3-pip python3-venv \
         libcurl4-gnutls-dev libbz2-dev libzip-dev autoconf automake \
-        libtool m4 gcc make pkg-config libmaxminddb-dev libssh2-1-dev \
+        libtool m4 gcc make pkg-config libmaxminddb-dev \
         libjpeg-dev libfreetype6-dev libsodium-dev libonig-dev
 
     # PCRE selection: Debian 12+ / Ubuntu 22+ -> PCRE2, otherwise PCRE1
@@ -696,7 +698,7 @@ install_php_extensions() {
     "$pecl" channel-update pecl.php.net || true
 
     _pecl_ext maxminddb maxminddb.so
-    _pecl_ext ssh2      ssh2.so
+    _ssh2_ext
     _pecl_ext igbinary  igbinary.so
     _pecl_ext redis     redis.so
 
@@ -718,6 +720,60 @@ _pecl_ext() {
         log "✓ $pkg installed ($ext_dir/$so)"
     else
         warn "✗ $pkg: $so not built/installed in $ext_dir — not adding to php.ini"
+    fi
+}
+
+# libssh2, static and position-independent, for the ssh2 extension. The
+# distros' own is too old on most targets (1.10 on ubuntu22/debian12): below
+# 1.11 it signs RSA host keys only with ssh-rsa (SHA-1), which OpenSSH 8.8+
+# refuses, so the panel could not reach a load balancer offering only an RSA
+# host key. Linked into ssh2.so, it needs no libssh2 on the server; it uses the
+# system OpenSSL (libcrypto) and zlib, which PHP links too.
+LIBSSH2_PREFIX="$BUILD_DIR/libssh2-static"
+
+build_libssh2() {
+    log "Building libssh2 ${V_LIBSSH2} (static, for the ssh2 extension)..."
+    cd "$BUILD_DIR"
+    if [[ ! -d "libssh2-${V_LIBSSH2}" ]]; then
+        download_json libssh2 "libssh2-${V_LIBSSH2}.tar.gz" "$V_LIBSSH2" || error "Error downloading libssh2"
+        tar -xzf "libssh2-${V_LIBSSH2}.tar.gz"
+    fi
+    cd "libssh2-${V_LIBSSH2}"
+    ./configure --prefix="$LIBSSH2_PREFIX" --disable-shared --enable-static --with-pic \
+        --with-crypto=openssl --disable-examples-build --disable-docker-tests
+    make -j$(nproc)
+    make install
+    cd "$BUILD_DIR"
+    log "libssh2 ${V_LIBSSH2} built into $LIBSSH2_PREFIX"
+}
+
+# _ssh2_ext — the ssh2 extension from PECL's source, built against build_libssh2's
+# static libssh2 (`pecl install` would link the distro's). Its libraries go after
+# its objects (SSH2_SHARED_LIBADD), where --as-needed keeps them, so the .so names
+# libcrypto and libz itself. Registered in php.ini only if built, as _pecl_ext
+# does; verify_php_extensions hard-fails a missing or wrongly linked one.
+_ssh2_ext() {
+    log "Installing PHP extension: ssh2 (libssh2 ${V_LIBSSH2}, static)"
+    if ! (
+        set -e
+        cd "$BUILD_DIR"
+        rm -rf ssh2-*/ ssh2-*.tgz
+        "$pecl" download ssh2
+        tar -xzf ssh2-*.tgz
+        cd "$(ls -d ssh2-*/ | head -1)"
+        "$XC_VM_DIR/bin/php/bin/phpize"
+        # LIBS: configure's link probe against the static libssh2 needs its libraries too.
+        ./configure --with-php-config="$XC_VM_DIR/bin/php/bin/php-config" --with-ssh2="$LIBSSH2_PREFIX" LIBS="-lcrypto -lz"
+        make -j$(nproc) SSH2_SHARED_LIBADD="-L$LIBSSH2_PREFIX/lib -lssh2 -lcrypto -lz"
+        make install
+    ); then
+        warn "ssh2 build reported an error"
+    fi
+    if [[ -f "$ext_dir/ssh2.so" ]]; then
+        echo "extension=ssh2.so" >> "$XC_VM_DIR/bin/php/lib/php.ini"
+        log "✓ ssh2 installed ($ext_dir/ssh2.so)"
+    else
+        warn "✗ ssh2: ssh2.so not built/installed in $ext_dir — not adding to php.ini"
     fi
 }
 
@@ -754,6 +810,16 @@ verify_php_extensions() {
     fi
 
     log "✓ All ${#required[@]} required PHP extensions present"
+
+    # ssh2 must carry build_libssh2's libssh2 (rsa-sha2), linked in: not a
+    # distro one, which the server would have to provide and could be too old.
+    local ssh2_libssh2 ssh2_so
+    ssh2_libssh2="$("$php_bin" -i 2>/dev/null | sed -n 's/^libssh2 version => //p')"
+    ssh2_so="$("$XC_VM_DIR/bin/php/bin/php-config" --extension-dir)/ssh2.so"
+    if [[ "$ssh2_libssh2" != "$V_LIBSSH2" ]] || readelf -d "$ssh2_so" | grep -q 'libssh2'; then
+        error "ssh2 must link libssh2 ${V_LIBSSH2} statically (built against '${ssh2_libssh2}'; see $LOG_FILE)"
+    fi
+    log "✓ ssh2 links libssh2 ${V_LIBSSH2} statically"
 
     # ionCube Loader is added to php.ini conditionally (per architecture);
     # report its status without failing the build.
@@ -1013,6 +1079,7 @@ main() {
     enable_opcache
 
     # Extensions and additional binary
+    build_libssh2
     install_php_extensions
     verify_php_extensions
     build_network_binary

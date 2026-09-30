@@ -95,6 +95,27 @@ check_zlib() {
     fi
 }
 
+# ─── libssh2 (tags "libssh2-X.Y.Z") ───
+check_libssh2() {
+    local cur
+    cur=$(current_version libssh2)
+    local latest
+    latest=$(curl -fsSL --max-time 15 "https://api.github.com/repos/libssh2/libssh2/releases/latest" \
+        | jq -r '.tag_name' \
+        | sed 's/^libssh2-//')
+    if [[ -z "$latest" || "$latest" == "null" ]]; then
+        echo -e "${YELLOW}[SKIP] libssh2: could not fetch latest version${NC}"
+        return
+    fi
+    if [[ "$cur" != "$latest" ]]; then
+        echo -e "${GREEN}[UPDATE] libssh2: $cur → $latest${NC}"
+        NEW_VERSIONS[libssh2]="$latest"
+        CHANGES=$((CHANGES + 1))
+    else
+        echo "  [OK] libssh2: $cur"
+    fi
+}
+
 # ─── PCRE2 ───
 check_pcre2() {
     local cur
@@ -166,6 +187,7 @@ check_zlib
 check_pcre2
 check_php
 check_flv_module
+check_libssh2
 echo ""
 
 # ─── Apply updates ───

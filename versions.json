@@ -35,6 +35,13 @@
       "https://github.com/PhilipHazel/pcre2/releases/download/pcre2-{VERSION}/pcre2-{VERSION}.tar.gz"
     ]
   },
+  "libssh2": {
+    "version": "1.11.1",
+    "url": [
+      "https://libssh2.org/download/libssh2-{VERSION}.tar.gz",
+      "https://github.com/libssh2/libssh2/releases/download/libssh2-{VERSION}/libssh2-{VERSION}.tar.gz"
+    ]
+  },
   "php": {
     "version": "8.1.34",
     "url": [

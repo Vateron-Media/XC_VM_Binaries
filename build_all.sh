@@ -81,7 +81,7 @@ download_deps() {
 
     echo ">>> Pre-downloading source archives into $DOWNLOADS_DIR"
 
-    local v_nginx v_openssl v_zlib v_pcre v_pcre2 v_php v_flv
+    local v_nginx v_openssl v_zlib v_pcre v_pcre2 v_php v_flv v_libssh2
     v_nginx=$(_json_ver nginx)
     v_openssl=$(_json_ver openssl)
     v_zlib=$(_json_ver zlib)
@@ -89,6 +89,7 @@ download_deps() {
     v_pcre2=$(_json_ver pcre2)
     v_php=$(_json_ver php)
     v_flv=$(_json_ver nginx_http_flv_module)
+    v_libssh2=$(_json_ver libssh2)
 
     fetch_json nginx                 "nginx-${v_nginx}.tar.gz"                    "$v_nginx"
     fetch_json openssl               "openssl-${v_openssl}.tar.gz"               "$v_openssl"
@@ -98,6 +99,7 @@ download_deps() {
     fetch_json pcre2                 "pcre2-${v_pcre2}.tar.gz"                   "$v_pcre2"
     fetch_json php                   "php-${v_php}.tar.gz"                       "$v_php"
     fetch_json nginx_http_flv_module "nginx-http-flv-module-${v_flv}.zip"        "$v_flv"
+    fetch_json libssh2               "libssh2-${v_libssh2}.tar.gz"               "$v_libssh2"
 
     # ionCube loader bundle for the host architecture (containers share host arch).
     local arch arch_tag
