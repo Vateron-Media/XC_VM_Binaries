@@ -156,7 +156,7 @@ Build scripts read versions from this file at startup — no hardcoded versions 
 
 **Automatic updates**: A GitHub Actions workflow (`check-versions.yml`) runs weekly and:
 
-1. Checks upstream releases for all components (nginx, openssl, zlib, pcre2, php, flv-module)
+1. Checks upstream releases for all components (nginx, openssl, zlib, pcre2, php, flv-module, libssh2)
 2. Updates `versions.json` if newer versions are found
 3. Creates an auto-commit with the diff
 
@@ -180,6 +180,7 @@ Build scripts read versions from this file at startup — no hardcoded versions 
 | pcre2                 | GitHub releases              |
 | php                   | php.net (8.1.x branch)       |
 | nginx-http-flv-module | GitHub releases              |
+| libssh2               | GitHub releases              |
 
 ---
 
