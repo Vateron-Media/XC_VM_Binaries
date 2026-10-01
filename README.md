@@ -91,7 +91,6 @@ Result:
 out/
 ├── debian_12.tar.gz
 ├── debian_13.tar.gz
-├── ubuntu_18.tar.gz
 ├── ubuntu_20.tar.gz
 ├── ubuntu_22.tar.gz
 ├── ubuntu_24.tar.gz

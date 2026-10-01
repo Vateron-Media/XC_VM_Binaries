@@ -178,7 +178,7 @@ install_dependencies() {
         log "Installing PCRE2 (Debian 12+ / Ubuntu 22+)"
         apt-get install -y libpcre2-8-0 libpcre2-dev
     else
-        log "Installing PCRE1 (Debian 11 / Ubuntu 18 / Ubuntu 20)"
+        log "Installing PCRE1 (Ubuntu 20)"
         apt-get install -y libpcre3 libpcre3-dev
     fi
 
@@ -231,7 +231,7 @@ install_dependencies() {
     apt-get clean
     rm -rf /var/lib/apt/lists/*
 
-    # Fallback for Debian 11 / Ubuntu 20.04 or pipx failure
+    # Fallback for Ubuntu 20.04 or pipx failure
     if ! $USE_PIPX; then
         warn "pipx unavailable, using virtualenv"
 
@@ -239,15 +239,8 @@ install_dependencies() {
             log "Installing PyInstaller via venv..."
             python3 -m venv /opt/pyinstaller_env
 
-            # Pin versions for Python < 3.8 (e.g. Ubuntu 18.04 with Python 3.6)
-            if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,8) else 1)'; then
-                /opt/pyinstaller_env/bin/pip install --upgrade pip
-                /opt/pyinstaller_env/bin/pip install pyinstaller
-            else
-                warn "Python < 3.8 detected, using compatible versions"
-                /opt/pyinstaller_env/bin/pip install --upgrade "pip<22"
-                /opt/pyinstaller_env/bin/pip install "pyinstaller<5"
-            fi
+            /opt/pyinstaller_env/bin/pip install --upgrade pip
+            /opt/pyinstaller_env/bin/pip install pyinstaller
 
             ln -sf /opt/pyinstaller_env/bin/pyinstaller /usr/local/bin/pyinstaller
         fi

@@ -37,8 +37,8 @@ the tiny `.so` changes. **The build lives in the private extension repo**
 (`XC_VM_CoreExtention`, `build_script/build_release.sh`): it pulls the PHP toolchain out of
 this repo's published runtime archives (`bin/php` inside `<target>.tar.gz` — no PHP recompile),
 compiles one `.so` **per OpenSSL-ABI group** on the group's oldest-glibc member
-(`openssl1.1` = ubuntu20, built on ubuntu20 — debian11 dropped, no longer the group's
-base; `openssl3` = ubuntu22/debian12/ubuntu24/debian13 built on ubuntu22), load-tests
+(`openssl1.1` = ubuntu20, built on ubuntu20;
+`openssl3` = ubuntu22/debian12/ubuntu24/debian13 built on ubuntu22), load-tests
 each on every member's own PHP, and publishes a GitHub Release.
 
 This repo's only role is to **receive** those assets: `.github/workflows/sync-xcvm-core.yml`
