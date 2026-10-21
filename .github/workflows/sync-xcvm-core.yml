@@ -4,15 +4,15 @@ name: Sync xcvm extension (Rust)
 # GitHub Release and commits them into this public repo flat under bin/xcvm_extention/.
 #
 # The extension repo now ships the RUST rewrite (self-contained .so, no OpenSSL/libsodium
-# linkage), grouped per PHP ABI version (php8.1, php8.4).
+# linkage), grouped per PHP ABI version (php8.1, php8.3, …).
 #
 # Split of responsibilities (the build itself lives in the private repo):
 #   private repo (XC_VM_CoreExtention):  builds the Rust .so matrix, load-tests each
-#     PHP-version group, and publishes a Release with the assets
-#     xcvm_core-php8.1.tar.gz and xcvm_core-php8.4.tar.gz.
-#   this workflow:  downloads those assets with a token that has READ access to the
-#     private repo (secret XCVM_CORE_PAT) and overwrites them flat under
-#     bin/xcvm_extention/ (fixed paths, no per-version dirs) plus version.json +
+#     PHP-version group, and publishes a Release with one xcvm_core-php<X.Y>.tar.gz
+#     asset per group.
+#   this workflow:  downloads every such asset (whatever groups the release ships)
+#     with a token that has READ access to the private repo (secret XCVM_CORE_PAT),
+#     overwrites them flat under bin/xcvm_extention/ (fixed paths, no per-version dirs) plus version.json +
 #     SHA256SUMS, stamps the "xcvm_extention" block in versions.json, and commits. The
 #     private token never leaves CI — customer servers only ever see this PUBLIC repo.
 #
@@ -37,8 +37,9 @@ permissions:
 env:
   # Private repo that publishes the xcvm extension release assets. Override here if it moves.
   EXT_REPO: Vateron-Media/XC_VM_CoreExtention
-  # Group archives expected as release assets (per PHP ABI version, Rust build).
-  GROUPS: "php8.1 php8.4"
+  # Group archives (one per PHP ABI version, Rust build): every asset matching this
+  # pattern is synced, so a new PHP version needs no edit here.
+  ASSET_GLOB: "xcvm_core-php*.tar.gz"
 
 jobs:
   sync:
@@ -65,10 +66,10 @@ jobs:
             echo "Resolved latest tag: $TAG"
           fi
           echo "TAG=$TAG" >> "$GITHUB_ENV"
-          for g in $GROUPS; do
-            gh release download "$TAG" --repo "$EXT_REPO" \
-              --pattern "xcvm_core-$g.tar.gz" --dir _dl --clobber
-          done
+          gh release download "$TAG" --repo "$EXT_REPO" \
+            --pattern "$ASSET_GLOB" --dir _dl --clobber
+          compgen -G "_dl/$ASSET_GLOB" >/dev/null \
+            || { echo "::error::release $TAG has no $ASSET_GLOB assets"; exit 1; }
           ls -l _dl
 
       - name: Stage into bin/xcvm_extention/
@@ -79,8 +80,8 @@ jobs:
           # repo tags releases as the BARE version (no "v" prefix), so the tag is a valid
           # fallback as-is; the ${TAG#v} strip is just defensive in case that ever changes.
           VER="${TAG#v}"
-          for g in $GROUPS; do
-            tar -xzf "_dl/xcvm_core-$g.tar.gz" -C _dl VERSION 2>/dev/null && break || true
+          for a in _dl/$ASSET_GLOB; do
+            tar -xzf "$a" -C _dl ./VERSION 2>/dev/null && break || true
           done
           [ -f _dl/VERSION ] && VER="$(tr -d '[:space:]' < _dl/VERSION)"
           [ -n "$VER" ] || { echo "::error::could not determine version"; exit 1; }
@@ -88,12 +89,12 @@ jobs:
 
           # Flat layout: the group archives live at a FIXED path and are overwritten each
           # release (no per-version subdirectories). version.json next to them records the
-          # current version; SHA256SUMS carries the integrity hashes.
+          # current version; SHA256SUMS carries the integrity hashes. The directory mirrors
+          # the release: a group the release no longer ships is removed.
           DEST="bin/xcvm_extention"
           mkdir -p "$DEST"
-          for g in $GROUPS; do
-            cp "_dl/xcvm_core-$g.tar.gz" "$DEST/"
-          done
+          rm -f "${DEST:?}"/${ASSET_GLOB:?}
+          cp _dl/$ASSET_GLOB "$DEST/"
           ( cd "$DEST" && sha256sum xcvm_core-*.tar.gz > SHA256SUMS )
           printf '{\n  "version": "%s"\n}\n' "$VER" > "$DEST/version.json"
           echo "Staged:"; ls -l "$DEST"
