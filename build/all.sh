@@ -616,9 +616,6 @@ install_php_extensions() {
     ext_dir="$("$XC_VM_DIR/bin/php/bin/php-config" --extension-dir)"
     mkdir -p "$ext_dir"
 
-    # Update PECL channel to avoid protocol warnings
-    "$pecl" channel-update pecl.php.net || true
-
     _pecl_ext maxminddb maxminddb.so
     _ssh2_ext
     _pecl_ext igbinary  igbinary.so
@@ -633,16 +630,17 @@ install_php_extensions() {
 # warning on every run (e.g. "Unable to load dynamic library 'maxminddb.so'").
 # Missing extensions are surfaced loudly here and hard-failed by
 # verify_php_extensions. Relies on $pecl and $ext_dir set by the caller.
+# The version is pinned in versions.json (pecl_<pkg>) and the tarball comes from
+# the host cache, so pecl installs a local file and never asks pecl.php.net.
 _pecl_ext() {
     local pkg="$1" so="$2"
-    log "Installing PHP extension: $pkg"
-    # pecl.php.net intermittently answers 500 / drops connections: retry.
-    local try
-    for try in 1 2 3; do
-        echo "yes" | "$pecl" install "$pkg" && break
-        warn "pecl install $pkg reported an error (attempt $try/3)"
-        sleep 10
-    done
+    local ver tgz
+    ver=$(_json_ver "pecl_$pkg" "$VERSIONS_FILE")
+    tgz="${pkg}-${ver}.tgz"
+    log "Installing PHP extension: $pkg $ver"
+    if download_json "pecl_$pkg" "$tgz" "$ver"; then
+        echo "yes" | "$pecl" install "$BUILD_DIR/$tgz" || warn "pecl install $pkg reported an error"
+    fi
     if [[ -f "$ext_dir/$so" ]]; then
         echo "extension=$so" >> "$XC_VM_DIR/bin/php/lib/php.ini"
         log "✓ $pkg installed ($ext_dir/$so)"
@@ -681,14 +679,15 @@ build_libssh2() {
 # libcrypto and libz itself. Registered in php.ini only if built, as _pecl_ext
 # does; verify_php_extensions hard-fails a missing or wrongly linked one.
 _ssh2_ext() {
-    log "Installing PHP extension: ssh2 (libssh2 ${V_LIBSSH2}, static)"
+    local ver
+    ver=$(_json_ver pecl_ssh2 "$VERSIONS_FILE")
+    log "Installing PHP extension: ssh2 $ver (libssh2 ${V_LIBSSH2}, static)"
     if ! (
         set -e
         cd "$BUILD_DIR"
-        rm -rf ssh2-*/ ssh2-*.tgz
-        for try in 1 2 3; do "$pecl" download ssh2 && break; sleep 10; done
-        tar -xzf ssh2-*.tgz
-        cd "$(ls -d ssh2-*/ | head -1)"
+        download_json pecl_ssh2 "ssh2-${ver}.tgz" "$ver"
+        tar -xzf "ssh2-${ver}.tgz"
+        cd "ssh2-${ver}"
         "$XC_VM_DIR/bin/php/bin/phpize"
         # LIBS: configure's link probe against the static libssh2 needs its libraries too.
         ./configure --with-php-config="$XC_VM_DIR/bin/php/bin/php-config" --with-ssh2="$LIBSSH2_PREFIX" LIBS="-lcrypto -lz"

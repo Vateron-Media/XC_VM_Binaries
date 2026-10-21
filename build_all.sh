@@ -101,6 +101,14 @@ download_deps() {
     fetch_json nginx_http_flv_module "nginx-http-flv-module-${v_flv}.zip"        "$v_flv"
     fetch_json libssh2               "libssh2-${v_libssh2}.tar.gz"               "$v_libssh2"
 
+    # PECL extensions, pinned: containers install these local tarballs instead of
+    # each asking the (often flaky) pecl.php.net for the latest release.
+    local pkg v_pkg
+    for pkg in maxminddb ssh2 igbinary redis; do
+        v_pkg=$(_json_ver "pecl_$pkg")
+        fetch_json "pecl_$pkg" "${pkg}-${v_pkg}.tgz" "$v_pkg"
+    done
+
     # ionCube loader bundle for the host architecture (containers share host arch).
     local arch arch_tag
     arch="$(uname -m)"

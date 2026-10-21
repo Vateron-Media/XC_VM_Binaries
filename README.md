@@ -180,6 +180,10 @@ Build scripts read versions from this file at startup — no hardcoded versions 
 | php                   | php.net (8.3.x branch)       |
 | nginx-http-flv-module | GitHub releases              |
 | libssh2               | GitHub releases              |
+| pecl_maxminddb        | pecl.php.net (stable)        |
+| pecl_ssh2             | pecl.php.net (stable)        |
+| pecl_igbinary         | pecl.php.net (stable)        |
+| pecl_redis            | pecl.php.net (stable)        |
 
 ---
 

@@ -178,6 +178,28 @@ check_flv_module() {
     fi
 }
 
+# ─── PECL extensions (latest numeric stable; pecl marks some RCs "stable") ───
+check_pecl() {
+    local pkg="$1" key="pecl_$1"
+    local cur
+    cur=$(current_version "$key")
+    local latest
+    latest=$(curl -fsSL --max-time 30 "https://pecl.php.net/rest/r/${pkg}/allreleases.xml" \
+        | grep -oP '<v>\K[0-9]+\.[0-9]+\.[0-9]+(?=</v><s>stable</s>)' \
+        | head -1)
+    if [[ -z "$latest" ]]; then
+        echo -e "${YELLOW}[SKIP] $key: could not fetch latest version${NC}"
+        return
+    fi
+    if [[ "$cur" != "$latest" ]]; then
+        echo -e "${GREEN}[UPDATE] $key: $cur → $latest${NC}"
+        NEW_VERSIONS[$key]="$latest"
+        CHANGES=$((CHANGES + 1))
+    else
+        echo "  [OK] $key: $cur"
+    fi
+}
+
 # ─── Run all checks ───
 echo "=== Checking for latest versions ==="
 echo ""
@@ -188,6 +210,7 @@ check_pcre2
 check_php
 check_flv_module
 check_libssh2
+for pkg in maxminddb ssh2 igbinary redis; do check_pecl "$pkg"; done
 echo ""
 
 # ─── Apply updates ───

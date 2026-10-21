@@ -48,6 +48,30 @@
       "https://www.php.net/distributions/php-{VERSION}.tar.gz"
     ]
   },
+  "pecl_maxminddb": {
+    "version": "1.14.0",
+    "url": [
+      "https://pecl.php.net/get/maxminddb-{VERSION}.tgz"
+    ]
+  },
+  "pecl_ssh2": {
+    "version": "1.5.0",
+    "url": [
+      "https://pecl.php.net/get/ssh2-{VERSION}.tgz"
+    ]
+  },
+  "pecl_igbinary": {
+    "version": "3.2.16",
+    "url": [
+      "https://pecl.php.net/get/igbinary-{VERSION}.tgz"
+    ]
+  },
+  "pecl_redis": {
+    "version": "6.3.0",
+    "url": [
+      "https://pecl.php.net/get/redis-{VERSION}.tgz"
+    ]
+  },
   "nginx_http_flv_module": {
     "version": "1.2.14",
     "url": [
