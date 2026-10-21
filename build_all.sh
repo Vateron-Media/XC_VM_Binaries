@@ -122,6 +122,9 @@ download_deps() {
 # ----------------------
 # Build function
 # ----------------------
+# Compiler cache: each target gets a named Docker volume xcvm-ccache-<target>
+# mounted at /ccache, so rebuilds recompile only sources that changed (e.g. a
+# nginx bump reuses all of PHP). Reset: docker volume rm xcvm-ccache-<target>.
 build() {
     local name=$1
     local base=$2
@@ -148,6 +151,7 @@ build() {
         -e TARGET="$target" \
         -v "$OUT_DIR:/build/out" \
         -v "$DOWNLOADS_DIR:/build/downloads:ro" \
+        -v "xcvm-ccache-$target:/ccache" \
         "xcvm-builder:$name" 2>&1 | tee -a "$logfile"
 
     echo ">>> Log saved: $logfile"
@@ -188,6 +192,7 @@ build_rocky() {
         -e TARGET=rocky_9 \
         -v "$OUT_DIR:/build/out" \
         -v "$DOWNLOADS_DIR:/build/downloads:ro" \
+        -v xcvm-ccache-rocky_9:/ccache \
         xcvm-builder:rocky9 2>&1 | tee -a "$logfile"
 
     echo ">>> Log saved: $logfile"

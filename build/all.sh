@@ -154,108 +154,6 @@ check_system() {
 }
 
 
-# Function to install system dependencies
-install_dependencies() {
-    log "Installing system dependencies..."
-
-    # Source os-release early so $ID is available for all distro-specific checks
-    . /etc/os-release
-
-    apt-get update -y
-
-    # Base build dependencies (common для всех дистрибутивов)
-    apt-get install -y \
-        build-essential zlib1g zlib1g-dev libssl-dev \
-        libgd-dev libxml2 libxml2-dev uuid-dev libxslt1-dev \
-        unzip wget curl git lsb-release \
-        python3 python3-pip python3-venv \
-        libcurl4-gnutls-dev libbz2-dev libzip-dev autoconf automake \
-        libtool m4 gcc make pkg-config libmaxminddb-dev \
-        libjpeg-dev libfreetype6-dev libsodium-dev libonig-dev
-
-    # PCRE selection: Debian 12+ / Ubuntu 22+ -> PCRE2, otherwise PCRE1
-    if [[ "$ID" == "debian" && "$VERSION_MAJOR" -ge 12 ]] || [[ "$ID" == "ubuntu" && "$VERSION_MAJOR" -ge 22 ]]; then
-        log "Installing PCRE2 (Debian 12+ / Ubuntu 22+)"
-        apt-get install -y libpcre2-8-0 libpcre2-dev
-    else
-        log "Installing PCRE1 (Ubuntu 20)"
-        apt-get install -y libpcre3 libpcre3-dev
-    fi
-
-    # Detect OS version
-    . /etc/os-release
-    log "Detected OS: $PRETTY_NAME"
-
-    USE_PIPX=false
-
-    # pipx available only on:
-    # - Debian 12+ (12,13)
-    # - Ubuntu 22+ (22,24)
-    if [[ "$ID" == "debian" ]]; then
-        if [[ "$VERSION_MAJOR" -ge 12 ]]; then
-            USE_PIPX=true
-        fi
-    elif [[ "$ID" == "ubuntu" ]]; then
-        if [[ "$VERSION_MAJOR" -ge 22 ]]; then
-            USE_PIPX=true
-        fi
-    fi
-
-    if $USE_PIPX; then
-        log "pipx supported on this system"
-
-        if ! command -v pipx &> /dev/null; then
-            log "Installing pipx..."
-
-            # python3-full exists only on newer systems
-            if apt-cache show python3-full &> /dev/null; then
-                apt-get install -y pipx python3-full
-            else
-                apt-get install -y pipx
-            fi
-        fi
-
-        pipx ensurepath
-        export PATH="$HOME/.local/bin:$PATH"
-
-        grep -q '.local/bin' /root/.bashrc || \
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
-
-        if ! command -v pyinstaller &> /dev/null; then
-            log "Installing PyInstaller with pipx..."
-            pipx install pyinstaller || USE_PIPX=false
-        fi
-    fi
-
-    # Free disk space: clean apt cache (after pipx install)
-    apt-get clean
-    rm -rf /var/lib/apt/lists/*
-
-    # Fallback for Ubuntu 20.04 or pipx failure
-    if ! $USE_PIPX; then
-        warn "pipx unavailable, using virtualenv"
-
-        if ! command -v pyinstaller &> /dev/null; then
-            log "Installing PyInstaller via venv..."
-            python3 -m venv /opt/pyinstaller_env
-
-            /opt/pyinstaller_env/bin/pip install --upgrade pip
-            /opt/pyinstaller_env/bin/pip install pyinstaller
-
-            ln -sf /opt/pyinstaller_env/bin/pyinstaller /usr/local/bin/pyinstaller
-        fi
-    fi
-
-    # Verify
-    if command -v pyinstaller &> /dev/null; then
-        log "✓ PyInstaller available: $(pyinstaller --version)"
-    else
-        error "Could not install PyInstaller"
-    fi
-
-    log "Dependencies installed correctly"
-}
-
 # Function to create necessary directories
 setup_directories() {
     log "Configuring directories..."
@@ -417,6 +315,34 @@ download_nginx_deps() {
     log "NGINX dependencies downloaded"
 }
 
+# OpenSSL, built ONCE into a static prefix that both nginx builds link against.
+# (--with-openssl=<src> made each nginx rebuild OpenSSL from scratch, tests
+# included.) Same options nginx itself used: no-shared no-threads, lib/ libdir.
+OPENSSL_PREFIX="$BUILD_DIR/openssl-static"
+
+build_openssl() {
+    log "Building OpenSSL ${V_OPENSSL} (static, shared by both nginx builds)..."
+    cd "$BUILD_DIR/openssl-${V_OPENSSL}"
+    ./config --prefix="$OPENSSL_PREFIX" --libdir=lib no-shared no-threads no-tests -fPIC
+    make -j$(nproc)
+    make install_sw
+    cd "$BUILD_DIR"
+    log "OpenSSL ${V_OPENSSL} built into $OPENSSL_PREFIX"
+}
+
+# _check_nginx_openssl <nginx-binary> — fail unless it carries build_openssl's
+# OpenSSL linked in. The distro's libssl-dev is installed too (PHP needs it), so a
+# wrong -I/-L would silently fall back to it and break the archive on other distros.
+_check_nginx_openssl() {
+    local bin="$1"
+    "$bin" -V 2>&1 | grep -q "built with OpenSSL ${V_OPENSSL} " \
+        || error "$bin is not built with OpenSSL ${V_OPENSSL}"
+    if readelf -d "$bin" | grep -qE 'NEEDED.*lib(ssl|crypto)'; then
+        error "$bin links the system OpenSSL dynamically"
+    fi
+    log "✓ $(basename "$bin") links OpenSSL ${V_OPENSSL} statically"
+}
+
 # Function to download NGINX modules
 download_nginx_modules() {
     log "Downloading NGINX modules..."
@@ -508,13 +434,11 @@ build_nginx() {
         --with-http_stub_status_module \
         --with-http_sub_module \
         --with-http_v2_module \
-        --with-cc-opt="$NGINX_STATIC_CFLAGS $NGINX_CFLAGS" \
-        --with-ld-opt="$NGINX_STATIC_LDFLAGS" \
+        --with-cc-opt="$NGINX_STATIC_CFLAGS $NGINX_CFLAGS -I$OPENSSL_PREFIX/include" \
+        --with-ld-opt="$NGINX_STATIC_LDFLAGS -L$OPENSSL_PREFIX/lib" \
         --with-pcre="../$PCRE_DIR" \
         $PCRE_FLAGS \
-        --with-zlib=../zlib-${V_ZLIB} \
-        --with-openssl=../openssl-${V_OPENSSL} \
-        --with-openssl-opt=no-nextprotoneg
+        --with-zlib=../zlib-${V_ZLIB}
 
     # Compile and install
     log "Compiling NGINX..."
@@ -525,6 +449,7 @@ build_nginx() {
     if [[ -f "$XC_VM_DIR/bin/nginx/sbin/nginx" ]]; then
         log "NGINX compiled successfully"
         "$XC_VM_DIR/bin/nginx/sbin/nginx" -V
+        _check_nginx_openssl "$XC_VM_DIR/bin/nginx/sbin/nginx"
     else
         error "NGINX was not compiled correctly"
     fi
@@ -540,6 +465,11 @@ build_nginx_rtmp() {
 
     # Clean previous configuration
     make clean || true
+
+    # nginx 1.31.8 removed the win32 IOCP module and its NGX_USE_IOCP_EVENT flag,
+    # which nginx-http-flv-module still tests. IOCP never applies on Linux, so 0 is exact.
+    local rtmp_compat=""
+    grep -q NGX_USE_IOCP_EVENT src/event/ngx_event.h || rtmp_compat="-DNGX_USE_IOCP_EVENT=0"
 
     log "Configuring NGINX with RTMP..."
     ./configure \
@@ -562,10 +492,8 @@ build_nginx_rtmp() {
         --with-pcre="../$PCRE_DIR" \
         $PCRE_FLAGS \
         --with-zlib=../zlib-${V_ZLIB} \
-        --with-openssl=../openssl-${V_OPENSSL} \
-        --with-openssl-opt="no-shared -fPIC" \
-        --with-cc-opt="$NGINX_CFLAGS" \
-        --with-ld-opt='-Wl,-z,relro -Wl,-z,now -pie'
+        --with-cc-opt="$NGINX_CFLAGS $rtmp_compat -I$OPENSSL_PREFIX/include" \
+        --with-ld-opt="-Wl,-z,relro -Wl,-z,now -pie -L$OPENSSL_PREFIX/lib"
 
     log "Compiling NGINX RTMP..."
     make -j$(nproc)
@@ -574,6 +502,7 @@ build_nginx_rtmp() {
     # Rename executable
     if [[ -f "$XC_VM_DIR/bin/nginx_rtmp/sbin/nginx" ]]; then
         mv "$XC_VM_DIR/bin/nginx_rtmp/sbin/nginx" "$XC_VM_DIR/bin/nginx_rtmp/sbin/nginx_rtmp"
+        _check_nginx_openssl "$XC_VM_DIR/bin/nginx_rtmp/sbin/nginx_rtmp"
         log "NGINX RTMP compiled successfully"
     else
         warn "Could not find NGINX RTMP binary"
@@ -584,7 +513,7 @@ build_nginx_rtmp() {
     # Free disk space: remove nginx/openssl/zlib/pcre sources (no longer needed)
     log "Freeing disk space after NGINX builds..."
     cd "$BUILD_DIR"
-    rm -rf nginx-${V_NGINX} openssl-${V_OPENSSL} zlib-${V_ZLIB} \
+    rm -rf nginx-${V_NGINX} openssl-${V_OPENSSL} "$OPENSSL_PREFIX" zlib-${V_ZLIB} \
            pcre-* pcre2-* ngx_* nginx-http-flv-module-* \
            maxmind lua-* headers-more-* 2>/dev/null || true
     rm -f *.tar.gz *.zip 2>/dev/null || true
@@ -707,7 +636,13 @@ install_php_extensions() {
 _pecl_ext() {
     local pkg="$1" so="$2"
     log "Installing PHP extension: $pkg"
-    echo "yes" | "$pecl" install "$pkg" || warn "pecl install $pkg reported an error"
+    # pecl.php.net intermittently answers 500 / drops connections: retry.
+    local try
+    for try in 1 2 3; do
+        echo "yes" | "$pecl" install "$pkg" && break
+        warn "pecl install $pkg reported an error (attempt $try/3)"
+        sleep 10
+    done
     if [[ -f "$ext_dir/$so" ]]; then
         echo "extension=$so" >> "$XC_VM_DIR/bin/php/lib/php.ini"
         log "✓ $pkg installed ($ext_dir/$so)"
@@ -751,7 +686,7 @@ _ssh2_ext() {
         set -e
         cd "$BUILD_DIR"
         rm -rf ssh2-*/ ssh2-*.tgz
-        "$pecl" download ssh2
+        for try in 1 2 3; do "$pecl" download ssh2 && break; sleep 10; done
         tar -xzf ssh2-*.tgz
         cd "$(ls -d ssh2-*/ | head -1)"
         "$XC_VM_DIR/bin/php/bin/phpize"
@@ -1052,12 +987,12 @@ main() {
     check_root
     check_system
 
-    # Installation and configuration
-    install_dependencies
+    # Build dependencies are preinstalled in the image (build/deps_debian.sh)
     setup_directories
 
     # Download dependencies and modules
     download_nginx_deps
+    build_openssl
     download_nginx_modules
 
     # Compilation of applications

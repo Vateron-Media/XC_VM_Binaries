@@ -121,39 +121,6 @@ check_system() {
     log "Sistema compatible: $ID $VERSION_ID"
 }
 
-# Instalar dependencias Rocky 9
-install_dependencies() {
-    log "Instalando dependencias del sistema..."
-    dnf install -y epel-release
-    dnf config-manager --set-enabled crb      # PowerTools en clones
-    dnf groupinstall -y "Development Tools"
-    dnf install -y --allowerasing \
-        pcre-devel zlib-devel openssl-devel gd-devel libxml2-devel \
-        libuuid-devel libxslt-devel unzip wget curl git python3 python3-pip \
-        libcurl-devel bzip2-devel libzip-devel autoconf automake libtool \
-        m4 gcc gcc-c++ make pkgconfig libmaxminddb-devel \
-        libjpeg-turbo-devel freetype-devel python3-virtualenv perl-FindBin perl-devel \
-        perl-core glibc-static libstdc++-static zlib-static pcre-static oniguruma-devel \
-        libsodium libsodium-devel
-
-    # pyinstaller vía pipx
-    if ! command -v pipx &>/dev/null; then
-        python3 -m pip install --user pipx
-        python3 -m pipx ensurepath
-    fi
-    export PATH="$HOME/.local/bin:$PATH"
-    echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
-
-    if ! command -v pyinstaller &>/dev/null; then
-        pipx install pyinstaller || {
-            python3 -m venv /tmp/pyinstaller_env
-            /tmp/pyinstaller_env/bin/pip install pyinstaller
-            ln -sf /tmp/pyinstaller_env/bin/pyinstaller /usr/local/bin/pyinstaller
-        }
-    fi
-    log "Dependencias instaladas"
-}
-
 # Crear directorios
 setup_directories() {
     log "Configurando directorios..."
@@ -211,14 +178,30 @@ download_nginx_modules() {
     log "Módulos NGINX descargados"
 }
 
-# Compilar OpenSSL estático
+# OpenSSL, built ONCE into a static prefix that both nginx builds link against
+# (--with-openssl=<src> made each nginx rebuild it from scratch). Same options
+# nginx itself used: no-shared no-threads, lib/ libdir. See build/all.sh.
+OPENSSL_PREFIX="$BUILD_DIR/openssl-static"
+
 build_openssl() {
     log "Compilando OpenSSL ${V_OPENSSL} estático..."
     cd "$BUILD_DIR/openssl-${V_OPENSSL}"
-    ./Configure linux-x86_64 no-shared no-tests -fPIC --prefix="$BUILD_DIR/openssl-${V_OPENSSL}/.openssl"
+    ./Configure linux-x86_64 no-shared no-threads no-tests -fPIC --prefix="$OPENSSL_PREFIX" --libdir=lib
     make -j$(nproc)
     make install_sw
     log "OpenSSL ${V_OPENSSL} listo"
+}
+
+# _check_nginx_openssl <nginx-binary> — fail unless it carries build_openssl's
+# OpenSSL linked in, not the system openssl-devel one (see build/all.sh).
+_check_nginx_openssl() {
+    local bin="$1"
+    "$bin" -V 2>&1 | grep -q "built with OpenSSL ${V_OPENSSL} " \
+        || error "$bin is not built with OpenSSL ${V_OPENSSL}"
+    if readelf -d "$bin" | grep -qE 'NEEDED.*lib(ssl|crypto)'; then
+        error "$bin links the system OpenSSL dynamically"
+    fi
+    log "✓ $(basename "$bin") links OpenSSL ${V_OPENSSL} statically"
 }
 
 # NGINX estándar
@@ -249,16 +232,15 @@ build_nginx() {
         --with-http_stub_status_module \
         --with-http_sub_module \
         --with-http_v2_module \
-        --with-cc-opt='-static -static-libgcc -O2 -g -pipe -Wall -U_FORTIFY_SOURCE -fexceptions -fstack-protector --param=ssp-buffer-size=4 -m64 -mtune=generic -fPIC' \
-        --with-ld-opt='-static -Wl,-z,relro -Wl,-z,now -pie -lpthread -ldl' \
+        --with-cc-opt="-static -static-libgcc -O2 -g -pipe -Wall -U_FORTIFY_SOURCE -fexceptions -fstack-protector --param=ssp-buffer-size=4 -m64 -mtune=generic -fPIC -I$OPENSSL_PREFIX/include" \
+        --with-ld-opt="-static -Wl,-z,relro -Wl,-z,now -pie -lpthread -ldl -L$OPENSSL_PREFIX/lib" \
         --with-pcre=../pcre-${V_PCRE} \
         --with-pcre-jit \
-        --with-zlib=../zlib-${V_ZLIB} \
-        --with-openssl=../openssl-${V_OPENSSL} \
-        --with-openssl-opt="no-shared no-tests -fPIC"
+        --with-zlib=../zlib-${V_ZLIB}
 
     make -j$(nproc)
     make install
+    _check_nginx_openssl "$XC_VM_DIR/bin/nginx/sbin/nginx"
     log "NGINX estándar listo"
 }
 
@@ -267,6 +249,11 @@ build_nginx_rtmp() {
     log "Compilando NGINX con RTMP..."
     cd "$BUILD_DIR/nginx-${V_NGINX}"
     make clean || true
+
+    # nginx 1.31.8 removed the win32 IOCP module and its NGX_USE_IOCP_EVENT flag,
+    # which nginx-http-flv-module still tests. IOCP never applies on Linux, so 0 is exact.
+    local rtmp_compat=""
+    grep -q NGX_USE_IOCP_EVENT src/event/ngx_event.h || rtmp_compat="-DNGX_USE_IOCP_EVENT=0"
 
     ./configure \
         --prefix="$XC_VM_DIR/bin/nginx_rtmp" \
@@ -285,14 +272,13 @@ build_nginx_rtmp() {
         --with-http_stub_status_module \
         --with-http_sub_module \
         --with-http_v2_module \
-        --with-cc-opt='-static -static-libgcc -O2 -g -pipe -Wall -U_FORTIFY_SOURCE -fexceptions -fstack-protector --param=ssp-buffer-size=4 -m64 -mtune=generic -fPIC' \
-        --with-ld-opt='-static -Wl,-z,relro -Wl,-z,now' \
-        --with-openssl=../openssl-${V_OPENSSL} \
-        --with-openssl-opt="no-shared no-tests -fPIC"		
+        --with-cc-opt="-static -static-libgcc -O2 -g -pipe -Wall -U_FORTIFY_SOURCE -fexceptions -fstack-protector --param=ssp-buffer-size=4 -m64 -mtune=generic -fPIC $rtmp_compat -I$OPENSSL_PREFIX/include" \
+        --with-ld-opt="-static -Wl,-z,relro -Wl,-z,now -L$OPENSSL_PREFIX/lib"
 
     make -j$(nproc)
     make install
     mv "$XC_VM_DIR/bin/nginx_rtmp/sbin/nginx" "$XC_VM_DIR/bin/nginx_rtmp/sbin/nginx_rtmp"
+    _check_nginx_openssl "$XC_VM_DIR/bin/nginx_rtmp/sbin/nginx_rtmp"
     log "NGINX-RTMP listo"
 }
 
@@ -516,7 +502,13 @@ build_network_binary() {
 _pecl_ext() {
     local pkg="$1" so="$2"
     log "Installing PHP extension: $pkg"
-    echo "yes" | "$pecl" install "$pkg" || warn "pecl install $pkg reported an error"
+    # pecl.php.net intermittently answers 500 / drops connections: retry.
+    local try
+    for try in 1 2 3; do
+        echo "yes" | "$pecl" install "$pkg" && break
+        warn "pecl install $pkg reported an error (attempt $try/3)"
+        sleep 10
+    done
     if [[ -f "$ext_dir/$so" ]]; then
         echo "extension=$so" >> "$XC_VM_DIR/bin/php/lib/php.ini"
         log "✓ $pkg installed ($ext_dir/$so)"
@@ -558,7 +550,7 @@ _ssh2_ext() {
         set -e
         cd "$BUILD_DIR"
         rm -rf ssh2-*/ ssh2-*.tgz
-        "$pecl" download ssh2
+        for try in 1 2 3; do "$pecl" download ssh2 && break; sleep 10; done
         tar -xzf ssh2-*.tgz
         cd "$(ls -d ssh2-*/ | head -1)"
         "$XC_VM_DIR/bin/php/bin/phpize"
@@ -665,7 +657,7 @@ main() {
     load_versions
     check_root
     check_system
-    install_dependencies
+    # Build dependencies are preinstalled in the image (build/deps_rocky9.sh)
     setup_directories
 
     download_nginx_deps
