@@ -19,7 +19,7 @@ The XC_VM build is performed according to the following principle:
 
    * NGINX
    * NGINX + RTMP
-   * PHP-FPM 8.1
+   * PHP-FPM 8.3
 5. The result is assembled in `/home/xc_vm`
 6. Binaries are packed into `<target>.tar.gz` and passed to the host
 
@@ -149,7 +149,7 @@ It:
 
   * NGINX
   * NGINX + RTMP
-  * PHP-FPM 8.1
+  * PHP-FPM 8.3
 * takes into account differences:
 
   * OpenSSL

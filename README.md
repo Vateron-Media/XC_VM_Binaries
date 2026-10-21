@@ -7,7 +7,7 @@ The system is designed for **deterministic builds**:
 
 - `nginx`
 - `nginx-rtmp`
-- `php-fpm 8.1`
+- `php-fpm 8.3`
 
 for specific distribution versions without polluting the host system.
 
@@ -177,9 +177,13 @@ Build scripts read versions from this file at startup — no hardcoded versions 
 | openssl               | GitHub releases (3.x branch) |
 | zlib                  | GitHub releases              |
 | pcre2                 | GitHub releases              |
-| php                   | php.net (8.1.x branch)       |
+| php                   | php.net (8.3.x branch)       |
 | nginx-http-flv-module | GitHub releases              |
 | libssh2               | GitHub releases              |
+| pecl_maxminddb        | pecl.php.net (stable)        |
+| pecl_ssh2             | pecl.php.net (stable)        |
+| pecl_igbinary         | pecl.php.net (stable)        |
+| pecl_redis            | pecl.php.net (stable)        |
 
 ---
 
@@ -250,7 +254,7 @@ A universal build script that **automatically adapts to the OS inside the contai
 
 - `nginx` build
 - `nginx-rtmp` build
-- `php-fpm 8.1` build
+- `php-fpm 8.3` build
 
 All binaries are installed in:
 

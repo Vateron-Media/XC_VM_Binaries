@@ -34,11 +34,15 @@ _json_urls() {
         sed -e "s/{VERSION}/${2:-}/g" -e "s/{ARCH}/${3:-}/g"
 }
 
+# Every filename download_deps asks for; prune_downloads deletes the rest.
+KEEP_FILES=()
+
 # fetch_dep <filename> <url> [mirror...] — skip if already cached and non-empty.
 fetch_dep() {
     local filename="$1"
     shift
     local dest="$DOWNLOADS_DIR/$filename"
+    KEEP_FILES+=("$filename")
 
     if [ -f "$dest" ] && [ "$(stat -c%s "$dest" 2>/dev/null || echo 0)" -ge 1024 ]; then
         echo "    SKIP (cached): $filename"
@@ -101,6 +105,14 @@ download_deps() {
     fetch_json nginx_http_flv_module "nginx-http-flv-module-${v_flv}.zip"        "$v_flv"
     fetch_json libssh2               "libssh2-${v_libssh2}.tar.gz"               "$v_libssh2"
 
+    # PECL extensions, pinned: containers install these local tarballs instead of
+    # each asking the (often flaky) pecl.php.net for the latest release.
+    local pkg v_pkg
+    for pkg in maxminddb ssh2 igbinary redis; do
+        v_pkg=$(_json_ver "pecl_$pkg")
+        fetch_json "pecl_$pkg" "${pkg}-${v_pkg}.tgz" "$v_pkg"
+    done
+
     # ionCube loader bundle for the host architecture (containers share host arch).
     local arch arch_tag
     arch="$(uname -m)"
@@ -116,12 +128,30 @@ download_deps() {
     # network.py helper script.
     fetch_json network_py "network.py"
 
+    prune_downloads
+
     echo ">>> Pre-download complete"
+}
+
+# Delete cached files no longer named by versions.json — e.g. the previous nginx
+# tarball after a version bump — so downloads/ does not grow with every update.
+prune_downloads() {
+    local f name
+    for f in "$DOWNLOADS_DIR"/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        [[ " ${KEEP_FILES[*]} " == *" $name "* ]] && continue
+        echo "    PRUNE (stale): $name"
+        rm -f "$f"
+    done
 }
 
 # ----------------------
 # Build function
 # ----------------------
+# Compiler cache: each target gets a named Docker volume xcvm-ccache-<target>
+# mounted at /ccache, so rebuilds recompile only sources that changed (e.g. a
+# nginx bump reuses all of PHP). Reset: docker volume rm xcvm-ccache-<target>.
 build() {
     local name=$1
     local base=$2
@@ -148,6 +178,7 @@ build() {
         -e TARGET="$target" \
         -v "$OUT_DIR:/build/out" \
         -v "$DOWNLOADS_DIR:/build/downloads:ro" \
+        -v "xcvm-ccache-$target:/ccache" \
         "xcvm-builder:$name" 2>&1 | tee -a "$logfile"
 
     echo ">>> Log saved: $logfile"
@@ -188,6 +219,7 @@ build_rocky() {
         -e TARGET=rocky_9 \
         -v "$OUT_DIR:/build/out" \
         -v "$DOWNLOADS_DIR:/build/downloads:ro" \
+        -v xcvm-ccache-rocky_9:/ccache \
         xcvm-builder:rocky9 2>&1 | tee -a "$logfile"
 
     echo ">>> Log saved: $logfile"

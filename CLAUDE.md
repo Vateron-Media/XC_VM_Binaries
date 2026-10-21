@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 A Docker-based, host-isolated build system that compiles XC_VM runtime **binaries** —
-`nginx`, `nginx_rtmp` (RTMP/FLV), and `php-fpm 8.1` (with ionCube and OPcache) — for several
+`nginx`, `nginx_rtmp` (RTMP/FLV), and `php-fpm 8.3` (with ionCube and OPcache) — for several
 Linux distributions. There is no application source code here; the deliverable is one
 self-contained `out/<target>.tar.gz` per distribution. The private `xcvm_core` PHP extension
 is **not** built or bundled here — it is compiled/released from the `XC_VM_CoreExtention` repo
@@ -25,28 +25,30 @@ and delivered separately (see below).
 ```
 
 - A target is **skipped** if its `out/<target>.tar.gz` already exists. Delete the archive to force a rebuild.
+- Build dependencies are baked into the image layer from `build/deps_debian.sh` / `build/deps_rocky9.sh`
+  (cached by Docker; refresh with `docker build --no-cache` or `docker builder prune`).
+- Compiler output is cached by ccache in per-target Docker volumes `xcvm-ccache-<target>`;
+  `docker volume rm xcvm-ccache-<target>` resets one.
 - Per-target build logs land in `logs/<target>.log`.
 - `out/`, `logs/`, and `downloads/` are gitignored (build artifacts / caches).
+- `downloads/` self-prunes: after pre-download, `build_all.sh` deletes every file there that the
+  current `versions.json` no longer names (old versions after a bump).
 
 ## The xcvm_core extension is built elsewhere; this repo only receives it
 
-The `xcvm_core.so` is coupled only to (a) the PHP 8.1 ABI — **identical on every target**,
-same PHP source — and (b) the SONAME of the distro's system OpenSSL/libsodium/curl/glibc,
-which differs. So shipping a new extension never rebuilds `nginx`/`php`/`nginx_rtmp` — only
-the tiny `.so` changes. **The build lives in the private extension repo**
-(`XC_VM_CoreExtention`, `build_script/build_release.sh`): it pulls the PHP toolchain out of
-this repo's published runtime archives (`bin/php` inside `<target>.tar.gz` — no PHP recompile),
-compiles one `.so` **per OpenSSL-ABI group** on the group's oldest-glibc member
-(`openssl1.1` = ubuntu20, built on ubuntu20;
-`openssl3` = ubuntu22/debian12/ubuntu24/debian13 built on ubuntu22), load-tests
-each on every member's own PHP, and publishes a GitHub Release.
+The extension is a Rust rewrite: a self-contained `xcvm_core.so` (no OpenSSL/libsodium
+linkage) coupled only to the PHP ABI version — **identical on every target**, same PHP source.
+So shipping a new extension never rebuilds `nginx`/`php`/`nginx_rtmp` — only the `.so`
+changes. **The build lives in the private extension repo** (`XC_VM_CoreExtention`): it
+compiles one `.so` **per PHP-version group** (`php8.1`, `php8.4`), load-tests each, and
+publishes a GitHub Release.
 
 This repo's only role is to **receive** those assets: `.github/workflows/sync-xcvm-core.yml`
 is triggered (repository_dispatch `xcvm_core_released`) by the extension repo's release,
 downloads the group archives with a private-read token (secret `XCVM_CORE_PAT`), overwrites them
-flat under `bin/xcvm_core/` (fixed paths — no per-version dirs — plus `version.json` and
-`SHA256SUMS`), and stamps `versions.json → "xcvm_core".version` (the single source of truth for
-the extension version). The private token stays in CI; customer
+flat under `bin/xcvm_extention/` (fixed paths — no per-version dirs — plus `version.json` and
+`SHA256SUMS`), and stamps `versions.json → "xcvm_extention".version` (the single source of truth
+for the extension version). The private token stays in CI; customer
 servers only ever see this public repo. Servers hot-swap the `.so` and reload php-fpm
 (`kill -USR2`). Token setup/rotation is documented in the extension repo's `docs/10-release-ci.md`.
 
