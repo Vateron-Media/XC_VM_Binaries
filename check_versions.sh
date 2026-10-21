@@ -137,12 +137,12 @@ check_pcre2() {
     fi
 }
 
-# ─── PHP 8.1.x (latest patch) ───
+# ─── PHP 8.3.x (latest patch) ───
 check_php() {
     local cur
     cur=$(current_version php)
     local latest
-    latest=$(curl -fsSL --max-time 15 "https://www.php.net/releases/index.php?json&version=8.1" \
+    latest=$(curl -fsSL --max-time 15 "https://www.php.net/releases/index.php?json&version=8.3" \
         | jq -r '.version // empty')
     if [[ -z "$latest" ]]; then
         echo -e "${YELLOW}[SKIP] php: could not fetch latest version${NC}"

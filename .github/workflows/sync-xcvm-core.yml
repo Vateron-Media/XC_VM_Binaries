@@ -4,10 +4,7 @@ name: Sync xcvm extension (Rust)
 # GitHub Release and commits them into this public repo flat under bin/xcvm_extention/.
 #
 # The extension repo now ships the RUST rewrite (self-contained .so, no OpenSSL/libsodium
-# linkage), grouped per PHP ABI version (php8.1, php8.4) instead of the old OpenSSL-ABI
-# split. To avoid disturbing installs pinned to the retired C build, the Rust artifacts
-# land in a SEPARATE tree — bin/xcvm_extention/ — and the legacy C releases under
-# bin/xcvm_core/ are left frozen (this workflow never writes there any more).
+# linkage), grouped per PHP ABI version (php8.1, php8.4).
 #
 # Split of responsibilities (the build itself lives in the private repo):
 #   private repo (XC_VM_CoreExtention):  builds the Rust .so matrix, load-tests each
@@ -91,8 +88,7 @@ jobs:
 
           # Flat layout: the group archives live at a FIXED path and are overwritten each
           # release (no per-version subdirectories). version.json next to them records the
-          # current version; SHA256SUMS carries the integrity hashes. This is a SEPARATE
-          # tree from the legacy C build (bin/xcvm_core/), which stays frozen.
+          # current version; SHA256SUMS carries the integrity hashes.
           DEST="bin/xcvm_extention"
           mkdir -p "$DEST"
           for g in $GROUPS; do
@@ -107,7 +103,7 @@ jobs:
           set -euo pipefail
           VER='${{ steps.stage.outputs.ver }}'
           # Update ONLY the "version" line inside the "xcvm_extention" block, leaving the
-          # rest of versions.json (formatting, the legacy "xcvm_core" block, mirror lists)
+          # rest of versions.json (formatting, mirror lists)
           # byte-for-byte untouched.
           awk -v ver="$VER" '
             /"xcvm_extention"[[:space:]]*:/ { inblk=1 }

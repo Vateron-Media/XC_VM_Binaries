@@ -833,7 +833,7 @@ install_ioncube_loader() {
 
     cd "$BUILD_DIR"
 
-    # PHP major.minor (e.g. 8.1 from 8.1.34) selects the matching loader .so.
+    # PHP major.minor (e.g. 8.3 from 8.3.36) selects the matching loader .so.
     local php_mm="${V_PHP%.*}"
 
     # ionCube ships one bundle per CPU architecture.
@@ -973,7 +973,7 @@ build_network_binary() {
 }
 
 # NOTE: the private PHP extension (xcvm_core) is NOT built here. It is compiled and
-# released from the XC_VM_CoreExtention repo and delivered separately (bin/xcvm_core/,
+# released from the XC_VM_CoreExtention repo and delivered separately (bin/xcvm_extention/,
 # see CLAUDE.md). This runtime build only provides the PHP toolchain the extension is
 # later compiled against.
 
