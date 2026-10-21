@@ -31,6 +31,8 @@ and delivered separately (see below).
   `docker volume rm xcvm-ccache-<target>` resets one.
 - Per-target build logs land in `logs/<target>.log`.
 - `out/`, `logs/`, and `downloads/` are gitignored (build artifacts / caches).
+- `downloads/` self-prunes: after pre-download, `build_all.sh` deletes every file there that the
+  current `versions.json` no longer names (old versions after a bump).
 
 ## The xcvm_core extension is built elsewhere; this repo only receives it
 

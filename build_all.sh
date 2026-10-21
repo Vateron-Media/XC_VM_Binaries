@@ -34,11 +34,15 @@ _json_urls() {
         sed -e "s/{VERSION}/${2:-}/g" -e "s/{ARCH}/${3:-}/g"
 }
 
+# Every filename download_deps asks for; prune_downloads deletes the rest.
+KEEP_FILES=()
+
 # fetch_dep <filename> <url> [mirror...] — skip if already cached and non-empty.
 fetch_dep() {
     local filename="$1"
     shift
     local dest="$DOWNLOADS_DIR/$filename"
+    KEEP_FILES+=("$filename")
 
     if [ -f "$dest" ] && [ "$(stat -c%s "$dest" 2>/dev/null || echo 0)" -ge 1024 ]; then
         echo "    SKIP (cached): $filename"
@@ -124,7 +128,22 @@ download_deps() {
     # network.py helper script.
     fetch_json network_py "network.py"
 
+    prune_downloads
+
     echo ">>> Pre-download complete"
+}
+
+# Delete cached files no longer named by versions.json — e.g. the previous nginx
+# tarball after a version bump — so downloads/ does not grow with every update.
+prune_downloads() {
+    local f name
+    for f in "$DOWNLOADS_DIR"/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        [[ " ${KEEP_FILES[*]} " == *" $name "* ]] && continue
+        echo "    PRUNE (stale): $name"
+        rm -f "$f"
+    done
 }
 
 # ----------------------
