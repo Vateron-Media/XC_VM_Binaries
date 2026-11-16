@@ -1,6 +1,6 @@
 {
   "_comment": "Versions are auto-updated by check_versions.sh. URLs are editable here by hand — all build scripts read them, so download links can be changed without touching any script. Each 'url' is an ordered mirror list, tried in turn. Placeholders: {VERSION}, {ARCH}.",
-  "_updated": "2026-11-09",
+  "_updated": "2026-11-16",
   "nginx": {
     "version": "1.31.8",
     "url": [
@@ -55,7 +55,7 @@
     ]
   },
   "pecl_ssh2": {
-    "version": "1.5.0",
+    "version": "1.6.0",
     "url": [
       "https://pecl.php.net/get/ssh2-{VERSION}.tgz"
     ]
